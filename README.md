@@ -26,7 +26,7 @@
 Установка на новом компьютере (нужны Python ≥ 3.10, git и bash; на Windows — WSL):
 
 ```bash
-git clone --recurse-submodules https://github.com/neverlaast/labelme_medphys_sam2.git
+git clone --recurse-submodules https://github.com/neverlaast/bmstu_masters_labelme_medphys_sam2.git
 cd labelme_medphys_sam2
 bash scripts/bootstrap.sh                   # .venv, зависимости, PyTorch, SAM2
 bash scripts/download_sam2_checkpoints.sh   # веса SAM2.1 small
