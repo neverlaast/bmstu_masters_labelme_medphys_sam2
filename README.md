@@ -23,83 +23,112 @@
 
 ## Установка и запуск
 
-Установка на новом компьютере (нужны Python ≥ 3.10, git и bash; на Windows — WSL):
+### Требования
+
+- macOS или Linux; на Windows — через WSL (Ubuntu);
+- Python ≥ 3.10, git, bash;
+- около 3 ГБ на диске (PyTorch и веса модели) и интернет на время установки;
+- желательно GPU: Apple Silicon (MPS) или NVIDIA (CUDA). На CPU программа
+  тоже работает, но сегментация медленнее.
+
+### Установка
 
 ```bash
 git clone --recurse-submodules https://github.com/neverlaast/bmstu_masters_labelme_medphys_sam2.git
-cd labelme_medphys_sam2
-bash scripts/bootstrap.sh                   # .venv, зависимости, PyTorch, SAM2
-bash scripts/download_sam2_checkpoints.sh   # веса SAM2.1 small
+cd bmstu_masters_labelme_medphys_sam2
+bash scripts/bootstrap.sh                   # окружение .venv и все зависимости
+bash scripts/download_sam2_checkpoints.sh   # веса SAM2.1 small (~180 МБ)
 ```
 
-SAM2 подключён как git submodule (`third_party/sam2_upstream`). Если репозиторий
-склонирован без `--recurse-submodules`, выполните `git submodule update --init`.
+Что делает каждый шаг:
 
-Запуск из корня проекта:
+1. `git clone --recurse-submodules` скачивает проект вместе с исходным кодом
+   SAM2, подключённым как git submodule в `third_party/sam2_upstream`. Если
+   репозиторий склонирован без флага, выполните `git submodule update --init`.
+2. `bootstrap.sh` создаёт виртуальное окружение `.venv` и выполняет
+   `pip install -r requirements/dev.txt`. Зависимости разделены по файлам:
+
+   | Файл | Содержимое |
+   |---|---|
+   | `requirements/base.txt` | интерфейс и обработка данных: PyQt5, numpy, OpenCV, tifffile и др. |
+   | `requirements/sam2.txt` | `torch`, `torchvision` и SAM2 из `third_party/sam2_upstream` (editable) |
+   | `requirements/dev.txt` | `base.txt` + `sam2.txt` + pytest, black, ruff |
+
+   Стандартный PyTorch с PyPI поддерживает MPS на Apple Silicon и CUDA на
+   Linux; отдельной установки под платформу не требуется.
+3. `download_sam2_checkpoints.sh` скачивает веса с сервера Meta и проверяет
+   SHA-256. Веса в репозиторий не входят (`*.pt` в `.gitignore`).
+
+   ```bash
+   bash scripts/download_sam2_checkpoints.sh            # small, модель по умолчанию
+   bash scripts/download_sam2_checkpoints.sh tiny large # выборочно
+   bash scripts/download_sam2_checkpoints.sh all
+   ```
+
+   Уже скачанные файлы с верной суммой пропускаются; прерванная загрузка
+   продолжается; файл с неверной суммой удаляется.
+
+### Запуск
 
 ```bash
-bash scripts/run_app.sh
+bash scripts/run_app.sh                              # обычный запуск
+bash scripts/run_app.sh /полный/путь/изображение.png # сразу открыть изображение
 ```
 
-Приложение само запускает SAM2 worker как дочерний процесс на свободном порту
-`127.0.0.1`, ждёт готовности по `/health` (статус «SAM2: starting / ready /
-failed» в строке состояния) и останавливает его при выходе. В меню
-«Segmentation / SAM2» есть «Restart worker» и «Show worker log».
+Сценарии сами переходят в корень проекта и используют `.venv`, активировать
+окружение вручную не нужно. Приложение запускает SAM2 worker как дочерний
+процесс на свободном порту `127.0.0.1`, ждёт готовности по `/health` (статус
+«SAM2: starting / ready / failed» в строке состояния) и останавливает его при
+выходе. Модель загружается при первом запросе сегментации. В меню
+«Segmentation / SAM2» есть «Restart worker» и «Show worker log» — при ошибке
+`WorkerResponseError` полный текст ошибки смотрите в журнале worker.
+
+### Выбор устройства и модели
 
 Параметры worker передаются через `--worker-arg`:
 
 ```bash
-bash scripts/run_app.sh --worker-arg=--device=cpu --worker-arg=--backend=stub
+bash scripts/run_app.sh --worker-arg=--device=cpu    # auto | cpu | cuda | mps
+bash scripts/run_app.sh --worker-arg=--backend=stub  # без модели, для проверки интерфейса
 ```
 
-Внешний worker (отдельный терминал, удалённая машина с GPU) по-прежнему
-поддерживается: если уже отвечает `http://127.0.0.1:8765` или задан
-`--worker-url` / `MEDPHYS_WORKER_URL`, автозапуск не выполняется;
-`--no-worker` отключает его полностью.
+При смене модели checkpoint и конфиг указываются вместе: конфиг задаёт
+архитектуру, checkpoint — веса для неё. При несовпадении загрузка завершится
+ошибкой `Missing key(s) in state_dict`.
 
 ```bash
-bash scripts/run_worker.sh                 # терминал 1, для отладки worker
-bash scripts/run_app.sh                    # терминал 2: подключится к нему
+bash scripts/run_app.sh \
+  --worker-arg=--device=mps \
+  --worker-arg=--checkpoint=third_party/sam2_upstream/sam2.1_hiera_large.pt \
+  --worker-arg=--config=configs/sam2.1/sam2.1_hiera_l.yaml
 ```
 
-Сценарии сами переходят в корень проекта и используют `.venv`. Новое окружение
-создаётся командой `bash scripts/bootstrap.sh` (зависимости из
-`requirements/dev.txt`; PyTorch для Mac с MPS — `requirements/mac_mps.txt`).
-При первом
-запросе сегментации worker загрузит SAM2.1 small из
-`third_party/sam2_upstream/sam2.1_hiera_small.pt`; проверка доступности worker
-сама по себе модель не загружает.
+| Модель | `--checkpoint` | `--config` |
+|---|---|---|
+| tiny | `third_party/sam2_upstream/sam2.1_hiera_tiny.pt` | `configs/sam2.1/sam2.1_hiera_t.yaml` |
+| small (по умолчанию) | `third_party/sam2_upstream/sam2.1_hiera_small.pt` | `configs/sam2.1/sam2.1_hiera_s.yaml` |
+| base_plus | `third_party/sam2_upstream/sam2.1_hiera_base_plus.pt` | `configs/sam2.1/sam2.1_hiera_b+.yaml` |
+| large | `third_party/sam2_upstream/sam2.1_hiera_large.pt` | `configs/sam2.1/sam2.1_hiera_l.yaml` |
 
-Веса SAM2.1 в репозиторий не входят (`*.pt` в `.gitignore`). Скачать и проверить SHA-256:
+Путь `--config` указывается относительно пакета `sam2`, а не корня проекта.
 
-```bash
-bash scripts/download_sam2_checkpoints.sh            # small, модель по умолчанию
-bash scripts/download_sam2_checkpoints.sh tiny large # выборочно
-bash scripts/download_sam2_checkpoints.sh all
-```
+### Отдельный worker
 
-Уже скачанные файлы с верной суммой пропускаются; прерванная загрузка
-продолжается; файл с неверной суммой удаляется.
-
-Можно открыть изображение сразу:
-
-```bash
-bash scripts/run_app.sh /полный/путь/изображение.png
-```
-
-Настройки worker:
+Worker можно запустить отдельно — для отладки или на удалённой машине с GPU.
+Если уже отвечает `http://127.0.0.1:8765` или задан `--worker-url` /
+`MEDPHYS_WORKER_URL`, автозапуск не выполняется; `--no-worker` отключает его
+полностью.
 
 ```bash
 bash scripts/run_worker.sh --help
-bash scripts/run_worker.sh --device cpu
 bash scripts/run_worker.sh --device mps \
   --checkpoint third_party/sam2_upstream/sam2.1_hiera_tiny.pt \
-  --config configs/sam2.1/sam2.1_hiera_t.yaml
+  --config configs/sam2.1/sam2.1_hiera_t.yaml   # терминал 1
+bash scripts/run_app.sh                         # терминал 2: подключится к нему
 ```
 
-GUI подключается к `http://127.0.0.1:8765`. Для другого адреса используйте
-переменную окружения `MEDPHYS_WORKER_URL`. Worker по умолчанию слушает только
-localhost; удалённый сервер требует отдельной настройки безопасности.
+Worker по умолчанию слушает только localhost; удалённый сервер требует
+отдельной настройки безопасности.
 
 ## Базовый сценарий SAM2
 

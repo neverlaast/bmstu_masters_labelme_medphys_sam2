@@ -1,0 +1,6 @@
+# Segmentation model stack (SAM2 worker).
+# Default PyPI wheels: macOS Apple Silicon -> MPS, Linux -> CUDA, Windows -> CPU.
+torch>=2.5.1
+torchvision>=0.20.1
+# SAM2 from the git submodule, editable install (path relative to project root)
+-e third_party/sam2_upstream
