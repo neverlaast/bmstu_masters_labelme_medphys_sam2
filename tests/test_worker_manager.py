@@ -2,6 +2,8 @@
 import os
 import sys
 import unittest
+import time
+import threading
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -95,6 +97,7 @@ class WorkerManagerTests(unittest.TestCase):
         with patch.object(self.client, "healthcheck", side_effect=self._health), \
                 patch.object(m, "_spawn") as spawn:
             m.ensure_running()
+            self.assertTrue(wait_until(lambda: m.state == "external"))
         spawn.assert_not_called()
         self.assertFalse(m.owns_process)
 
@@ -107,6 +110,7 @@ class WorkerManagerTests(unittest.TestCase):
         with patch.object(self.client, "healthcheck", side_effect=self._health):
             m.ensure_running()
             self.assertEqual(m.state, "starting")
+            self.assertTrue(wait_until(lambda: m.owns_process))
             self.assertEqual(self.client.base_url, f"http://127.0.0.1:{FAKE_PORT}")
             self.assertTrue(wait_until(lambda: "fake worker" in m.log_text()))
             self.alive = True
@@ -114,7 +118,64 @@ class WorkerManagerTests(unittest.TestCase):
             proc = m._process
             m.stop()
         self.assertEqual(proc.state(), QtCore.QProcess.NotRunning)
-        self.assertEqual(states, ["starting", "ready", "stopped"])
+        self.assertEqual(states, ["starting", "starting", "ready", "stopped"])
+
+    def test_slow_healthcheck_keeps_gui_responsive(self):
+        m = self.manager()
+        ticks, thread_ids = [], []
+        timer = QtCore.QTimer()
+        timer.timeout.connect(lambda: ticks.append(True))
+        timer.start(10)
+
+        def slow_health(timeout=.5):
+            thread_ids.append(threading.get_ident())
+            time.sleep(.2)
+
+        try:
+            with patch.object(self.client, "healthcheck", side_effect=slow_health):
+                m.ensure_running()
+                self.assertTrue(wait_until(lambda: m.state == "external"))
+            self.assertGreater(len(ticks), 4)
+            self.assertNotEqual(thread_ids[0], threading.get_ident())
+        finally:
+            timer.stop()
+
+    def test_stop_invalidates_inflight_discovery(self):
+        m = self.manager()
+        finished = threading.Event()
+
+        def delayed_failure(timeout=.5):
+            time.sleep(.1)
+            finished.set()
+            raise WorkerConnectionError("down")
+
+        with patch.object(self.client, "healthcheck", side_effect=delayed_failure), \
+                patch.object(m, "_spawn") as spawn:
+            m.ensure_running()
+            m.stop()
+            self.assertTrue(wait_until(finished.is_set))
+            QtWidgets.QApplication.processEvents()
+            spawn.assert_not_called()
+            self.assertEqual(m.state, "stopped")
+
+    def test_port_permission_error_reports_failure_without_escaping_qt_slot(self):
+        m = self.manager()
+        with patch.object(self.client, "healthcheck", side_effect=self._health), \
+                patch("app.worker_api.manager.find_free_port",
+                      side_effect=PermissionError("local sockets denied")):
+            m.ensure_running()
+            self.assertTrue(wait_until(lambda: m.state == "failed"))
+        self.assertFalse(m.owns_process)
+        self.assertIn("local sockets denied", m.log_text())
+
+    def test_failed_process_start_is_reported_without_waiting_for_timeout(self):
+        m = self.manager()
+        with patch.object(self.client, "healthcheck", side_effect=self._health), \
+                patch.object(m, "command", return_value=("/nonexistent/worker-python", [])):
+            m.ensure_running()
+            self.assertTrue(wait_until(lambda: m.state == "failed"))
+        self.assertFalse(m.owns_process)
+        self.assertIn("failed to start", m.log_text())
 
     def test_crashed_worker_reports_failed(self):
         m = self.manager(FakeWorkerManager)

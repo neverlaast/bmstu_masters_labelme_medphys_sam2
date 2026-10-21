@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import signal
+from contextlib import contextmanager
 
 from app.paths import LABELME_UPSTREAM_ROOT, ensure_labelme
 
@@ -26,12 +28,16 @@ def install_excepthook():
     import traceback
 
     def hook(kind, value, tb):
+        if issubclass(kind, KeyboardInterrupt):
+            window = QtWidgets.QApplication.activeWindow()
+            if window is not None:
+                window.close()
+            else:
+                QtWidgets.QApplication.quit()
+            return
         text = "".join(traceback.format_exception(kind, value, tb))
         logging.getLogger("medphys").error("Unhandled exception\n%s", text)
         sys.stderr.write(text)
-        if kind is KeyboardInterrupt:
-            QtWidgets.QApplication.quit()
-            return
         if QtWidgets.QApplication.instance() is not None:
             box = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Critical, "Unexpected error",
                                         f"{kind.__name__}: {str(value)[:2000]}")
@@ -39,6 +45,35 @@ def install_excepthook():
             box.exec_()
 
     sys.excepthook = hook
+
+
+@contextmanager
+def qt_interrupts(window):
+    """Translate terminal Ctrl+C to close, preserving save confirmation."""
+    pending = False
+
+    def close():
+        nonlocal pending
+        try:
+            window.close()
+        finally:
+            pending = False
+
+    def interrupt(*_):
+        nonlocal pending
+        if not pending:
+            pending = True
+            QtCore.QTimer.singleShot(0, close)
+
+    previous = signal.signal(signal.SIGINT, interrupt)
+    timer = QtCore.QTimer()
+    timer.timeout.connect(lambda: None)
+    timer.start(100)
+    try:
+        yield
+    finally:
+        timer.stop()
+        signal.signal(signal.SIGINT, previous)
 
 
 def main() -> int:
@@ -74,15 +109,20 @@ def main() -> int:
     if video_file:
         QtCore.QTimer.singleShot(0, lambda: window._import_video_dialog(path=args.image))
     window.setWindowTitle("LabelMe MedPhys SAM2")
-    if not args.no_worker:
-        from app.worker_api.manager import WorkerManager
-        manager = WorkerManager(window.worker_client, worker_args=args.worker_arg, parent=app)
-        app.aboutToQuit.connect(manager.stop)
-        window.attach_worker_manager(manager)
-    window.show()
-    window.raise_()
-
-    return app.exec_()
+    manager = None
+    with qt_interrupts(window):
+        try:
+            if not args.no_worker:
+                from app.worker_api.manager import WorkerManager
+                manager = WorkerManager(window.worker_client, worker_args=args.worker_arg, parent=app)
+                app.aboutToQuit.connect(manager.stop)
+                window.attach_worker_manager(manager)
+            window.show()
+            window.raise_()
+            return app.exec_()
+        finally:
+            if manager is not None:
+                manager.stop()
 
 
 if __name__ == "__main__":

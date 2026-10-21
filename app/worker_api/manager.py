@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import socket
 import sys
+import threading
 from collections import deque
 
 from qtpy import QtCore
@@ -28,6 +29,7 @@ class WorkerManager(QtCore.QObject):
     """States: stopped -> starting -> ready | failed; 'external' = not owned."""
 
     stateChanged = QtCore.Signal(str, str)  # state, message
+    _healthResult = QtCore.Signal(int, str, bool)
 
     HOST = "127.0.0.1"
     POLL_MS = 500
@@ -40,6 +42,9 @@ class WorkerManager(QtCore.QObject):
         self.state = "stopped"
         self.log = deque(maxlen=500)
         self._process = None
+        self._generation = 0
+        self._probe_pending = False
+        self._healthResult.connect(self._health_finished, QtCore.Qt.QueuedConnection)
         self._elapsed = QtCore.QElapsedTimer()
         self._timer = QtCore.QTimer(self)
         self._timer.setInterval(self.POLL_MS)
@@ -52,12 +57,13 @@ class WorkerManager(QtCore.QObject):
 
     def ensure_running(self) -> None:
         """Use an already running/external worker, otherwise spawn one."""
-        if self.owns_process:
+        if self.owns_process or self._probe_pending:
             return
-        if os.environ.get("MEDPHYS_WORKER_URL") or self._is_alive():
+        if os.environ.get("MEDPHYS_WORKER_URL"):
             self._set_state("external", f"Using external worker at {self.client.base_url}")
             return
-        self._spawn()
+        self._set_state("starting", "SAM2 worker: checking availability...")
+        self._probe_health("discover")
 
     def restart(self) -> None:
         self.stop()
@@ -65,6 +71,8 @@ class WorkerManager(QtCore.QObject):
 
     def stop(self, timeout_ms: int = 5000) -> None:
         self._timer.stop()
+        self._generation += 1
+        self._probe_pending = False
         proc, self._process = self._process, None
         if proc is not None and proc.state() != QtCore.QProcess.NotRunning:
             proc.finished.disconnect(self._on_finished)
@@ -79,7 +87,12 @@ class WorkerManager(QtCore.QObject):
 
     # -- internals ------------------------------------------------------------
     def _spawn(self) -> None:
-        port = find_free_port(self.HOST)
+        try:
+            port = find_free_port(self.HOST)
+        except OSError as exc:
+            self.log.append(f"Cannot bind local worker port: {exc}\n")
+            self._set_state("failed", "Cannot open a local worker port; see worker log.")
+            return
         self.client.base_url = f"http://{self.HOST}:{port}"
         proc = QtCore.QProcess(self)
         proc.setWorkingDirectory(str(PROJECT_ROOT))
@@ -89,6 +102,7 @@ class WorkerManager(QtCore.QObject):
         proc.setProcessEnvironment(env)
         proc.readyReadStandardOutput.connect(self._read_output)
         proc.finished.connect(self._on_finished)
+        proc.errorOccurred.connect(self._on_process_error)
         self._process = proc
         program, args = self.command(port)
         self.log.append(f"$ {program} {' '.join(args)}\n")
@@ -110,12 +124,41 @@ class WorkerManager(QtCore.QObject):
             return False
 
     def _poll(self) -> None:
-        if self._is_alive():
-            self._timer.stop()
-            self._set_state("ready", "SAM2 worker ready.")
-        elif self._elapsed.elapsed() > self.START_TIMEOUT_MS:
+        if self._elapsed.elapsed() > self.START_TIMEOUT_MS:
             self.stop()
             self._set_state("failed", "SAM2 worker did not start in time; see worker log.")
+        elif not self._probe_pending:
+            self._probe_health("poll")
+
+    def _probe_health(self, purpose):
+        """Never perform blocking HTTP in Qt's GUI thread."""
+        generation = self._generation
+        self._probe_pending = True
+
+        def probe():
+            try:
+                alive = self._is_alive()
+            except Exception:
+                alive = False
+            try:
+                self._healthResult.emit(generation, purpose, alive)
+            except RuntimeError:
+                pass  # GUI destroyed before the bounded probe completed.
+
+        threading.Thread(target=probe, daemon=True, name="worker-health").start()
+
+    def _health_finished(self, generation, purpose, alive):
+        if generation != self._generation:
+            return
+        self._probe_pending = False
+        if purpose == "discover":
+            if alive:
+                self._set_state("external", f"Using external worker at {self.client.base_url}")
+            else:
+                self._spawn()
+        elif alive and self.owns_process:
+            self._timer.stop()
+            self._set_state("ready", "SAM2 worker ready.")
 
     def _read_output(self) -> None:
         if self._process is not None:
@@ -125,8 +168,21 @@ class WorkerManager(QtCore.QObject):
     def _on_finished(self, code, _status=None) -> None:
         self._read_output()
         self._timer.stop()
+        self._generation += 1
+        self._probe_pending = False
         self._process = None
         self._set_state("failed", f"SAM2 worker exited (code {code}); see worker log.")
+
+    def _on_process_error(self, error):
+        if error != QtCore.QProcess.FailedToStart or self._process is None:
+            return
+        process, self._process = self._process, None
+        self.log.append(f"Worker failed to start: {process.errorString()}\n")
+        self._timer.stop()
+        self._generation += 1
+        self._probe_pending = False
+        self._set_state("failed", "SAM2 worker could not start; see worker log.")
+        process.deleteLater()
 
     def _set_state(self, state: str, message: str) -> None:
         self.state = state

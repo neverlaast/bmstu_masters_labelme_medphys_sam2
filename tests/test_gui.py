@@ -347,6 +347,44 @@ class GUITests(unittest.TestCase):
             self.pump_until(lambda: self.window._job is None)
         self.assertEqual(len(list(self.window._iter_sam2_candidate_shapes())), 0)
 
+    def test_cancel_stops_owned_worker_but_not_external_worker(self):
+        from unittest.mock import Mock
+        job = Mock()
+        manager = Mock()
+        self.window.worker_manager = manager
+        self.window._job = job
+        manager.owns_process = True
+        self.window._cancel_sam2()
+        job.cancel.assert_called_once()
+        manager.stop.assert_called_once_with(timeout_ms=150)
+        manager.stop.reset_mock()
+        manager.owns_process = False
+        self.window._cancel_sam2()
+        manager.stop.assert_not_called()
+        self.window._job = None
+
+    def test_close_stops_owned_inference_before_save_confirmation(self):
+        from unittest.mock import Mock
+        from labelme.app import MainWindow
+        job, manager, event = Mock(), Mock(), Mock()
+        running = [True]
+        job.isRunning.side_effect = lambda: running[0]
+        def stop(**_):
+            running[0] = False
+        manager.stop.side_effect = stop
+        manager.owns_process = True
+        self.window.worker_manager = manager
+        self.window._jobs.add(job)
+        try:
+            with patch.object(MainWindow, "closeEvent") as upstream:
+                self.window.closeEvent(event)
+            manager.stop.assert_called_once_with(timeout_ms=150)
+            job.cancel.assert_called_once()
+            upstream.assert_called_once_with(event)
+            event.ignore.assert_not_called()
+        finally:
+            self.window._jobs.discard(job)
+
     def test_frame_change_discards_stale_result(self):
         self.prompt("circle")
         response = SegmentationResponse(

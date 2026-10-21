@@ -1083,8 +1083,13 @@ class MedPhysLabelMeWindow(ObjectPropertiesMixin, ProjectWindowMixin, LabelMeMai
         if self._job is not None:
             self._job.cancel()
             self._cancel_action.setEnabled(False)
-            self.statusBar().showMessage(
-                "Result cancelled. Worker may finish the calculation; its result will be discarded.", 8000)
+            manager = getattr(self, "worker_manager", None)
+            if manager is not None and manager.owns_process:
+                manager.stop(timeout_ms=150)
+                self.statusBar().showMessage("SAM2 cancelled; local worker stopped.", 8000)
+            else:
+                self.statusBar().showMessage(
+                    "Result cancelled. External worker may finish the calculation.", 8000)
 
     def _make_candidate(self, polygon, index=0, score=None):
         import math
@@ -1589,8 +1594,15 @@ class MedPhysLabelMeWindow(ObjectPropertiesMixin, ProjectWindowMixin, LabelMeMai
         if any(job.isRunning() for job in self._jobs):
             for job in self._jobs:
                 job.cancel()
-            self.statusBar().showMessage(
-                "Pending result cancelled. Close again after the request finishes.", 8000)
-            event.ignore()
-            return
+            manager = getattr(self, "worker_manager", None)
+            if manager is not None and manager.owns_process:
+                manager.stop(timeout_ms=150)
+                for job in self._jobs:
+                    if job.isRunning():
+                        job.wait(1000)
+            if any(job.isRunning() for job in self._jobs):
+                self.statusBar().showMessage(
+                    "Pending result cancelled. Close again after the request finishes.", 8000)
+                event.ignore()
+                return
         super().closeEvent(event)
