@@ -18,6 +18,8 @@ class AdapterCapabilities:
     automatic: bool = False
     embeddings: bool = False
     sequence: bool = False
+    # Frame-to-frame propagation through the /propagate endpoint (video predictor).
+    propagation: bool = False
 
     def to_dict(self):
         return asdict(self)

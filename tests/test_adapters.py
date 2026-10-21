@@ -79,6 +79,8 @@ class AdapterTests(unittest.TestCase):
         adapter = validate_adapter(RealSam2ModelAdapter(checkpoint_path="missing", config_path="missing"))
         self.assertTrue(adapter.get_capabilities().embeddings)
         self.assertFalse(adapter.get_capabilities().sequence)
+        # Frame propagation goes through /propagate (video predictor), not process_sequence.
+        self.assertTrue(adapter.get_capabilities().propagation)
         with self.assertRaises(NotImplementedError):
             adapter.process_sequence(None)
         from worker import main as server
@@ -93,3 +95,37 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(Point(1, 2, 1).x, 1)
         self.assertEqual(Box(0, 0, 10, 10).x_max, 10)
         self.assertTrue(AdapterCapabilities(automatic=True).to_dict()["automatic"])
+
+
+class Sam2VariantTests(unittest.TestCase):
+    def test_variant_and_config_from_checkpoint(self):
+        from worker.model_registry import resolve_sam2_config, sam2_variant_from_checkpoint
+        cases = {"tiny": "t", "small": "s", "base_plus": "b+", "large": "l"}
+        for variant, suffix in cases.items():
+            ckpt = f"third_party/sam2_upstream/sam2.1_hiera_{variant}.pt"
+            self.assertEqual(sam2_variant_from_checkpoint(ckpt), variant)
+            self.assertEqual(resolve_sam2_config(ckpt, None), f"configs/sam2.1/sam2.1_hiera_{suffix}.yaml")
+        self.assertIsNone(sam2_variant_from_checkpoint("my_finetuned.pt"))
+
+    def test_mismatched_pair_rejected_and_unknown_name_needs_config(self):
+        from worker.model_registry import resolve_sam2_config
+        with self.assertRaisesRegex(ValueError, "large but config is small"):
+            resolve_sam2_config("sam2.1_hiera_large.pt", "configs/sam2.1/sam2.1_hiera_s.yaml")
+        with self.assertRaisesRegex(ValueError, "pass --config"):
+            resolve_sam2_config("my_finetuned.pt", None)
+        self.assertEqual(resolve_sam2_config("my_finetuned.pt", "configs/x.yaml"), "configs/x.yaml")
+
+    def test_default_model_is_large_and_reported(self):
+        from worker import main as server
+        from worker.model_registry import RealSam2ModelAdapter
+        self.assertTrue(server.DEFAULT_SAM2_CHECKPOINT_PATH.endswith("sam2.1_hiera_large.pt"))
+        self.assertEqual(server.DEFAULT_SAM2_CONFIG_PATH, "configs/sam2.1/sam2.1_hiera_l.yaml")
+        adapter = RealSam2ModelAdapter(checkpoint_path=server.DEFAULT_SAM2_CHECKPOINT_PATH,
+                                       config_path=server.DEFAULT_SAM2_CONFIG_PATH)
+        with patch.object(server, "MODEL_ADAPTER", adapter):
+            health = server.build_health_payload()
+        self.assertEqual(health.model_info["variant"], "large")
+        from app.gui.labelme_window import format_model_capabilities
+        text = format_model_capabilities(health)
+        self.assertIn("Model: SAM2.1 large", text)
+        self.assertIn("Propagation to other frames (video predictor): yes", text)

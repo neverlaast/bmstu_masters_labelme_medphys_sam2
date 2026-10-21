@@ -129,6 +129,19 @@ class MenuSmokeTests(unittest.TestCase):
         self.application.processEvents()
         self.assertIsNone(self.window._job, f"'{text}' did not finish")
 
+    def test_multiple_regions_through_real_http_handler(self):
+        for kind, x in [("circle", 25), ("rectangle", 65)]:
+            self.window._activate_sam2_prompt_drawing(kind)
+            shape = Shape(shape_type=kind)
+            shape.addPoint(QtCore.QPointF(x, 30))
+            shape.addPoint(QtCore.QPointF(x+12, 42))
+            self.window.canvas.current = shape
+            self.window.canvas.finalise()
+        self.trigger("Run SAM2")
+        candidates = list(self.window._iter_sam2_candidate_shapes())
+        self.assertEqual(len(candidates), 2)
+        self.assertEqual([s.other_data["prompt_index"] for s in candidates], [1, 2])
+
     def prompt(self, kind, label=1, pts=((40, 40), (52, 40))):
         self.window._activate_sam2_prompt_drawing(kind, label)
         shape = Shape(shape_type=kind)
@@ -143,7 +156,7 @@ class MenuSmokeTests(unittest.TestCase):
 
     def test_every_menu_item_is_present(self):
         expected = [
-            "Propagate objects to other frames...", "Check worker", "Restart worker",
+            "Propagate objects to other frames...", "Restart worker",
             "Show worker log", "Show model capabilities", "Unload current model",
             "Positive point", "Negative point", "Rectangle prompt", "Circle prompt: one object",
             "Finish prompt drawing", "Run SAM2", "Refine previously selected mask",
@@ -154,7 +167,7 @@ class MenuSmokeTests(unittest.TestCase):
         self.assertEqual([t for t in self.actions], expected)
 
     def test_worker_service_items(self):
-        for text in ["Check worker", "Show model capabilities", "Clear worker cache",
+        for text in ["Show model capabilities", "Clear worker cache",
                      "Unload current model"]:
             with self.subTest(text):
                 self.messages.clear()

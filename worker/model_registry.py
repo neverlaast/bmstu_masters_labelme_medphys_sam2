@@ -48,6 +48,58 @@ class SamModelInfo:
     device: str = "cpu"
     loaded: bool = False
     checkpoint_sha256: str | None = None
+    variant: str | None = None
+
+
+# SAM2.1 size variant -> config suffix (sam2.1_hiera_<variant>.pt <-> sam2.1_hiera_<suffix>.yaml)
+SAM2_VARIANTS = {"tiny": "t", "small": "s", "base_plus": "b+", "large": "l"}
+
+
+def sam2_variant_from_checkpoint(path: str | None) -> str | None:
+    """'.../sam2.1_hiera_large.pt' -> 'large'; None for unknown names."""
+    if not path:
+        return None
+    stem = Path(path).stem
+    for variant in sorted(SAM2_VARIANTS, key=len, reverse=True):
+        if stem.endswith("_" + variant):
+            return variant
+    return None
+
+
+def sam2_variant_from_config(path: str | None) -> str | None:
+    """'configs/sam2.1/sam2.1_hiera_l.yaml' -> 'large'; None for unknown names."""
+    if not path:
+        return None
+    stem = Path(path).stem
+    for variant, suffix in SAM2_VARIANTS.items():
+        if stem.endswith("_hiera_" + suffix):
+            return variant
+    return None
+
+
+def sam2_config_for_variant(variant: str) -> str:
+    return f"configs/sam2.1/sam2.1_hiera_{SAM2_VARIANTS[variant]}.yaml"
+
+
+def resolve_sam2_config(checkpoint_path: str | None, config_path: str | None) -> str:
+    """Pick the config matching the checkpoint, or reject a mismatched pair.
+
+    A config describes the architecture and a checkpoint holds weights for it;
+    loading weights into another size fails deep inside torch with
+    'Missing key(s) in state_dict', so the pair is checked up front.
+    """
+    ckpt_variant = sam2_variant_from_checkpoint(checkpoint_path)
+    if config_path is None:
+        if ckpt_variant is None:
+            raise ValueError(
+                f"Cannot infer SAM2 config from checkpoint name {checkpoint_path!r}; pass --config")
+        return sam2_config_for_variant(ckpt_variant)
+    cfg_variant = sam2_variant_from_config(config_path)
+    if ckpt_variant and cfg_variant and ckpt_variant != cfg_variant:
+        raise ValueError(
+            f"Checkpoint is SAM2.1 {ckpt_variant} but config is {cfg_variant} ({config_path}); "
+            f"use --config {sam2_config_for_variant(ckpt_variant)} or omit --config")
+    return config_path
 
 
 @dataclass
@@ -154,7 +206,8 @@ class RealSam2ModelAdapter:
     def get_capabilities(self):
         from worker.adapters import AdapterCapabilities
         return AdapterCapabilities(points=True, box=True, mask_refinement=True,
-                                   automatic=True, embeddings=True, sequence=False)
+                                   automatic=True, embeddings=True, sequence=False,
+                                   propagation=True)
 
     def prepare_image(self, request):
         from worker.predictors.sam2_predictor import read_image
@@ -266,6 +319,7 @@ class RealSam2ModelAdapter:
             device=self.device,
             loaded=self._loaded,
             checkpoint_sha256=self._checkpoint_hash,
+            variant=sam2_variant_from_checkpoint(self.checkpoint_path),
         )
 
     def get_load_error(self) -> str | None:

@@ -125,6 +125,28 @@ class ProjectGUITests(unittest.TestCase):
         self.assertEqual(self.window.canvas.shapes[0].description, "must survive")
         self.assertEqual(Path(self.window.imagePath).resolve(), self.image_path.resolve())
 
+    def test_frame_navigation_saves_without_question(self):
+        self.final()
+        second = Path(self.directory.name) / "second.png"
+        Image.new("RGB", (96, 96), "white").save(second)
+        self.window.create_project(self.path(), [self.image_path, second])
+        self.window.canvas.shapes[0].description = "edited"
+        self.window.setDirty()
+        with patch.object(QtWidgets.QMessageBox, "question") as question:
+            self.window.openNextImg()
+            self.assertEqual(Path(self.window.imagePath).resolve(), second.resolve())
+            self.window.openPrevImg()
+            self.window.fileListWidget.setCurrentRow(1)
+        question.assert_not_called()
+        self.assertEqual(Path(self.window.imagePath).resolve(), second.resolve())
+        self.assertEqual(load_project(self.path()).images[0].annotations[0].description, "edited")
+        # Leaving the project (not navigating) still asks.
+        self.window.setDirty()
+        with patch.object(QtWidgets.QMessageBox, "question",
+                          return_value=QtWidgets.QMessageBox.Cancel) as question:
+            self.assertFalse(self.window.mayContinue())
+        question.assert_called_once()
+
     def test_classes_dialog_edits_registry_without_invalid_migrations(self):
         self.final()
         self.window.create_project(self.path())

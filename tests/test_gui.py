@@ -74,6 +74,22 @@ class GUITests(unittest.TestCase):
             self.window.canvas.finalise()
         return shape
 
+    def test_point_mode_stays_active_for_several_points(self):
+        self.window._activate_sam2_prompt_drawing("point", 1)
+        for x, label in [(30, 1), (45, 1), (60, 0)]:
+            if label != self.window._prompt_label:
+                self.window._activate_sam2_prompt_drawing("point", label)
+            self.assertEqual(self.window.sam2_prompt_type, "point")
+            shape = Shape(shape_type="point")
+            shape.addPoint(QtCore.QPointF(x, 40))
+            self.window.canvas.current = shape
+            self.window.canvas.finalise()
+            self.assertEqual(self.window.sam2_prompt_type, "point")  # no re-selection needed
+        request = self.window._build_segmentation_request()
+        self.assertEqual([p.label for p in request.points], [1, 1, 0])
+        self.window.toggleDrawMode(True)
+        self.assertIsNone(self.window.sam2_prompt_type)
+
     def test_prompts_bypass_class_dialog_and_form_combined_request(self):
         roi = self.prompt("circle")
         self.prompt("point", 0)
@@ -94,6 +110,95 @@ class GUITests(unittest.TestCase):
         popup.assert_called_once()
         self.assertFalse(self.window._is_temporary(shape))
         self.assertEqual(shape.label, "cell")
+
+    def test_multiple_regions_and_points_form_independent_requests(self):
+        self.prompt("circle")
+        second = self.prompt("rectangle")
+        second.points = [QtCore.QPointF(65, 65), QtCore.QPointF(90, 90)]
+        self.prompt("point", 1)
+        negative = self.prompt("point", 0)
+        negative.points = [QtCore.QPointF(5, 5)]
+        requests = self.window._build_interactive_requests()
+        self.assertEqual(len(requests), 2)
+        self.assertIsNotNone(requests[0].circle)
+        self.assertIsNotNone(requests[1].box)
+        self.assertEqual([p.label for p in requests[0].points], [1, 0])
+        self.assertEqual([p.label for p in requests[1].points], [0])
+        self.assertTrue(all(not r.return_multiple_masks for r in requests))
+        self.assertEqual(requests[0].image_path, requests[1].image_path)
+        with self.assertRaisesRegex(ValueError, "Object search needs one ROI"):
+            self.window._build_segmentation_request("automatic")
+        whole = self.window._build_segmentation_request("automatic", whole_image=True)
+        self.assertIsNone(whole.circle)
+        self.assertIsNone(whole.box)
+
+    def test_positive_point_outside_or_in_overlapping_regions_is_rejected(self):
+        self.prompt("circle")
+        self.prompt("circle")
+        point = self.prompt("point")
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            self.window._build_interactive_requests()
+        point.points = [QtCore.QPointF(5, 5)]
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            self.window._build_interactive_requests()
+
+    def test_circle_and_rectangle_modes_stay_active(self):
+        for kind in ("circle", "rectangle"):
+            self.prompt(kind)
+            self.assertEqual(self.window.sam2_prompt_type, kind)
+            shape = Shape(shape_type=kind)
+            shape.addPoint(QtCore.QPointF(65, 65))
+            shape.addPoint(QtCore.QPointF(80, 80))
+            self.window.canvas.current = shape
+            self.window.canvas.finalise()
+            self.assertEqual(self.window.sam2_prompt_type, kind)
+        self.window.toggleDrawMode(True)
+        self.assertIsNone(self.window.sam2_prompt_type)
+
+    def test_batch_client_keeps_best_per_object_and_refinement_tokens(self):
+        from app.worker_api.client import WorkerClient
+        self.prompt("circle")
+        self.prompt("rectangle")
+        requests = self.window._build_interactive_requests()
+        a = SegmentationCandidate(score=.9, polygon=[[1, 1], [10, 1], [10, 10]],
+                                  refinement_token="a")
+        b = a.model_copy(update={"score": .7, "refinement_token": "b"})
+        response = SegmentationResponse(
+            ok=True, model_name="sam2", model_version="test", device="cpu",
+            elapsed_ms=10, candidates=[a, b])
+        client = WorkerClient()
+        with patch.object(client, "segment", return_value=response) as segment:
+            result = client.segment_many(requests)
+        self.assertEqual(segment.call_count, 2)
+        self.assertEqual(len(result.candidates), 2)
+        self.assertEqual(result.elapsed_ms, 20)
+        self.assertEqual([c.metadata["prompt_index"] for c in result.candidates], [1, 2])
+        self.assertEqual([c.refinement_token for c in result.candidates], ["a", "a"])
+        self.assertEqual(a.metadata, {})
+
+    def test_batch_cancellation_stops_next_request_and_failure_keeps_candidates(self):
+        from app.worker_api.errors import WorkerResponseError
+        self.prompt("circle")
+        self.prompt("rectangle")
+        requests = self.window._build_interactive_requests()
+        response = SegmentationResponse(
+            ok=True, model_name="sam2", model_version="test", device="cpu", elapsed_ms=1)
+        with patch.object(self.window.worker_client, "segment", return_value=response) as segment:
+            with self.assertRaisesRegex(WorkerResponseError, "cancelled"):
+                self.window.worker_client.segment_many(requests, cancelled=iter([False, True]).__next__)
+            self.assertEqual(segment.call_count, 1)
+        old = self.window._add_candidate_polygon_to_canvas([[1, 1], [10, 1], [10, 10]])
+        with patch.object(self.window.worker_client, "segment",
+                          side_effect=[response, WorkerResponseError("second failed")]), \
+                patch.object(QtWidgets.QMessageBox, "warning") as warning:
+            self.window._run_sam2()
+            deadline = time.monotonic() + 3
+            while self.window._job is not None and time.monotonic() < deadline:
+                self.application.processEvents()
+                time.sleep(.005)
+            self.assertIsNone(self.window._job)
+            self.assertIn(old, self.window.canvas.shapes)
+            warning.assert_called_once()
 
     def test_native_selection_is_bidirectional_and_keeps_candidates(self):
         final = self.final()

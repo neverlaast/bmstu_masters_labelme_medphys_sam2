@@ -37,7 +37,7 @@
 git clone --recurse-submodules https://github.com/neverlaast/bmstu_masters_labelme_medphys_sam2.git
 cd bmstu_masters_labelme_medphys_sam2
 bash scripts/bootstrap.sh                   # окружение .venv и все зависимости
-bash scripts/download_sam2_checkpoints.sh   # веса SAM2.1 small (~180 МБ)
+bash scripts/download_sam2_checkpoints.sh   # веса SAM2.1 large (~900 МБ)
 ```
 
 Что делает каждый шаг:
@@ -60,8 +60,8 @@ bash scripts/download_sam2_checkpoints.sh   # веса SAM2.1 small (~180 МБ)
    SHA-256. Веса в репозиторий не входят (`*.pt` в `.gitignore`).
 
    ```bash
-   bash scripts/download_sam2_checkpoints.sh            # small, модель по умолчанию
-   bash scripts/download_sam2_checkpoints.sh tiny large # выборочно
+   bash scripts/download_sam2_checkpoints.sh            # large, модель по умолчанию
+   bash scripts/download_sam2_checkpoints.sh tiny small # выборочно
    bash scripts/download_sam2_checkpoints.sh all
    ```
 
@@ -92,23 +92,28 @@ bash scripts/run_app.sh --worker-arg=--device=cpu    # auto | cpu | cuda | mps
 bash scripts/run_app.sh --worker-arg=--backend=stub  # без модели, для проверки интерфейса
 ```
 
-При смене модели checkpoint и конфиг указываются вместе: конфиг задаёт
-архитектуру, checkpoint — веса для неё. При несовпадении загрузка завершится
-ошибкой `Missing key(s) in state_dict`.
+По умолчанию используется SAM2.1 large. Другая модель выбирается через
+`--checkpoint`; конфиг (архитектура) подбирается по имени файла весов
+автоматически. Если `--config` указан явно и не соответствует checkpoint,
+worker не запустится и сообщит, какой конфиг нужен.
 
 ```bash
+bash scripts/download_sam2_checkpoints.sh small
 bash scripts/run_app.sh \
   --worker-arg=--device=mps \
-  --worker-arg=--checkpoint=third_party/sam2_upstream/sam2.1_hiera_large.pt \
-  --worker-arg=--config=configs/sam2.1/sam2.1_hiera_l.yaml
+  --worker-arg=--checkpoint=third_party/sam2_upstream/sam2.1_hiera_small.pt
 ```
+
+Для весов с нестандартным именем (например, дообученных) `--config`
+обязателен. Текущая модель, устройство и возможности показываются в
+«Segmentation / SAM2 → Show model capabilities».
 
 | Модель | `--checkpoint` | `--config` |
 |---|---|---|
 | tiny | `third_party/sam2_upstream/sam2.1_hiera_tiny.pt` | `configs/sam2.1/sam2.1_hiera_t.yaml` |
-| small (по умолчанию) | `third_party/sam2_upstream/sam2.1_hiera_small.pt` | `configs/sam2.1/sam2.1_hiera_s.yaml` |
+| small | `third_party/sam2_upstream/sam2.1_hiera_small.pt` | `configs/sam2.1/sam2.1_hiera_s.yaml` |
 | base_plus | `third_party/sam2_upstream/sam2.1_hiera_base_plus.pt` | `configs/sam2.1/sam2.1_hiera_b+.yaml` |
-| large | `third_party/sam2_upstream/sam2.1_hiera_large.pt` | `configs/sam2.1/sam2.1_hiera_l.yaml` |
+| large (по умолчанию) | `third_party/sam2_upstream/sam2.1_hiera_large.pt` | `configs/sam2.1/sam2.1_hiera_l.yaml` |
 
 Путь `--config` указывается относительно пакета `sam2`, а не корня проекта.
 
@@ -137,8 +142,9 @@ Worker по умолчанию слушает только localhost; удалё
 2. Через меню `Segmentation / SAM2` выбрать положительную/отрицательную точку,
    прямоугольник или круговой промт одного объекта.
 3. Нарисовать промт. Диалог назначения класса для промта не открывается.
-   Можно добавить несколько точек и один ROI; окончательные аннотации при этом
-   не преобразуются в временные промты.
+   Точки, круги и рамки можно рисовать подряд без повторного выбора инструмента;
+   `Finish prompt drawing` возвращает в режим редактирования.
+   Окончательные аннотации не преобразуются во временные промты.
 4. Нажать `Run SAM2` или Ctrl+Enter. HTTP-запрос выполняется вне потока GUI.
 5. Выделить кандидатов в панели `SAM2 Candidates`, принять или отклонить.
    Принятие выбранных не удаляет остальные кандидаты; повторный запрос заменяет
@@ -173,6 +179,25 @@ Worker по умолчанию слушает только localhost; удалё
 
 Для одиночного объекта используйте `Run SAM2`. Можно много раз изменять точки
 и ROI и запускать модель заново; каждое действие применяет текущие промпты.
+
+### Несколько явных промтов или автоматический поиск
+
+- `Run SAM2`: нарисуйте несколько кругов или рамок (можно смешивать) —
+  каждая область обозначает один отдельный объект. Запуск обрабатывает их
+  последовательно с использованием кэша embeddings, затем показывает вместе
+  не более одного кандидата на область. Это не GPU-batch. Без кругов/рамок
+  несколько точек по-прежнему совместно описывают один объект.
+- При нескольких областях положительная точка должна лежать внутри
+  одной из них (не на пересечении). Отрицательные точки применяются ко всем
+  областям для исключения фона. Неоднозначные положительные точки вызывают
+  предупреждение, а не автоматически назначаются соседнему объекту.
+- `Find objects inside ROI`: одна большая область, внутри которой программа
+  сама ищет неизвестное число объектов по сетке промтов. Если нарисованы
+  несколько областей, программа предложит использовать `Run SAM2` либо оставить
+  один ROI. `Find objects in whole image` ищет по всему изображению.
+- При ошибке одного запроса предыдущие кандидаты на холсте сохраняются,
+  частичный результат не применяется. Отмена прекращает отправку следующих
+  областей; уже начатое вычисление worker может закончить.
 Кеш embeddings сохраняет подготовку изображения между запросами.
 
 Для настоящего уточнения с маской:
@@ -422,6 +447,10 @@ propagation; предел импорта — 5000 кадров). Соответ�
 время сохраняется в `<папка кадров>/video_frames.json`, факт импорта — в журнале
 проекта. Далее: разметить объекты на одном кадре и выполнить
 `Propagate objects to other frames...`.
+
+Переход между кадрами проекта (список файлов, `Next/Prev Image`, клавиши `D`/`A`)
+сохраняет проект автоматически и не спрашивает подтверждения; вопрос о
+сохранении задаётся только при закрытии проекта или программы.
 
 Проверка на реальной модели (синтетическое видео, два движущихся диска, IoU с
 эталоном): `.venv/bin/python scripts/smoke_video.py --device cpu --variant tiny`.

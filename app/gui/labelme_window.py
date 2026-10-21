@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 from copy import deepcopy
+from contextlib import contextmanager
 from math import cos, sin, pi
 
 from app.paths import ensure_labelme
@@ -69,6 +70,36 @@ def _load_image_file(filename):
 
 LabelFile.load_image_file = staticmethod(_load_image_file)
 from app.gui.project_window import ProjectWindowMixin
+
+
+CAPABILITY_LABELS = [
+    ("points", "Point prompts (positive/negative)"),
+    ("box", "Box and circle prompts"),
+    ("mask_refinement", "Mask refinement"),
+    ("automatic", "Object search in ROI"),
+    ("embeddings", "Embedding cache (fast repeated prompts)"),
+    ("propagation", "Propagation to other frames (video predictor)"),
+]
+
+
+def format_model_capabilities(response) -> str:
+    """Human-readable model summary for 'Show model capabilities'."""
+    info = response.model_info or {}
+    variant = info.get("variant")
+    title = f"SAM2.1 {variant}" if variant else f"{response.model_name} {response.model_version}".strip()
+    checkpoint = info.get("checkpoint_path")
+    lines = [
+        f"Model: {title}",
+        f"Backend: {info.get('backend', '-')}",
+        f"Checkpoint: {Path(checkpoint).name if checkpoint else '-'}",
+        f"Config: {info.get('config_path') or '-'}",
+        f"Device: {response.device}",
+        f"Loaded: {'yes (in memory)' if response.model_loaded else 'no (loads on first request)'}",
+        "",
+    ]
+    caps = response.capabilities or {}
+    lines += [f"{label}: {'yes' if caps.get(key) else 'no'}" for key, label in CAPABILITY_LABELS]
+    return "\n".join(lines)
 
 logger = logging.getLogger(__name__)
 
@@ -163,11 +194,33 @@ class MedPhysLabelMeWindow(ProjectWindowMixin, LabelMeMainWindow):
         menu.addAction(action)
         return action
 
+    # Project navigation (file list, Next/Prev image) saves the current frame
+    # itself in _load_project_image; it must not ask "Save project?" every time.
+    def fileSelectionChanged(self):
+        with self._project_navigation():
+            return super().fileSelectionChanged()
+
+    def openNextImg(self, _value=False, load=True):
+        with self._project_navigation():
+            return super().openNextImg(_value, load)
+
+    def openPrevImg(self, _value=False):
+        with self._project_navigation():
+            return super().openPrevImg(_value)
+
+    @contextmanager
+    def _project_navigation(self):
+        previous = getattr(self, "_navigating_project", False)
+        self._navigating_project = self._project is not None
+        try:
+            yield
+        finally:
+            self._navigating_project = previous
+
     def _install_medphys_menu(self):
         menu = self.menuBar().addMenu("Segmentation / SAM2")
         self._action(menu, "Propagate objects to other frames...", self._propagate_dialog)
         menu.addSeparator()
-        self._action(menu, "Check worker", self._check_worker)
         self._action(menu, "Restart worker", self._restart_worker)
         self._action(menu, "Show worker log", self._show_worker_log)
         self._action(menu, "Show model capabilities", lambda: self._start_task(
@@ -674,10 +727,9 @@ class MedPhysLabelMeWindow(ProjectWindowMixin, LabelMeMainWindow):
             return
         if prompt_type not in {"point", "rectangle", "circle", "polygon"}:
             raise ValueError(f"Unsupported prompt type: {prompt_type}")
-        # Retain points to allow positive + negative prompts. Only one ROI.
+        # Keep previous prompts: circles and rectangles can denote separate
+        # objects. Automatic ROI search still validates that it has one ROI.
         if prompt_type != "point":
-            self._remove_shapes([s for s in self._iter_sam2_prompt_shapes()
-                                 if s.shape_type in {"rectangle", "circle", "polygon"}])
             self._refinement_token = self._refinement_source_id = None
         self._prompt_label = label
         self.toggleDrawMode(False, createMode=prompt_type)
@@ -702,13 +754,25 @@ class MedPhysLabelMeWindow(ProjectWindowMixin, LabelMeMainWindow):
             shape.fill_color.setAlpha(50)
             self.canvas.storeShapes()
             self.setDirty()
-            self.toggleDrawMode(True)
+            if shape.shape_type in {"point", "rectangle", "circle"}:
+                # Point mode stays active: several positive/negative points in a
+                # row without re-selecting the tool. Switching Positive/Negative
+                # keeps the points already placed.
+                count = sum(1 for s in self._iter_sam2_prompt_shapes()
+                            if s.shape_type == shape.shape_type)
+                kind = ("positive point" if self._prompt_label else "negative point"
+                        ) if shape.shape_type == "point" else shape.shape_type
+                self.statusBar().showMessage(
+                    f"{count} {shape.shape_type} prompt(s). Draw another {kind}; "
+                    "Ctrl+Enter runs SAM2; 'Finish prompt drawing' returns to editing.", 8000)
+            else:
+                self.toggleDrawMode(True)
             self._refresh_views()
         else:
             super().newShape()
             self._refresh_views()
 
-    def _build_segmentation_request(self, mode="interactive", whole_image=False, refine=False):
+    def _segmentation_prompts(self, mode="interactive", whole_image=False):
         prompts = [] if whole_image else list(self._iter_sam2_prompt_shapes())
         # Native final annotations may be used as prompts without conversion
         # into temporary objects or destruction of their label.
@@ -719,6 +783,64 @@ class MedPhysLabelMeWindow(ProjectWindowMixin, LabelMeMainWindow):
                 s.shape_type in {"rectangle", "circle", "polygon"} for s in prompts):
             prompts += [s for s in self.canvas.selectedShapes
                         if s.shape_type in {"rectangle", "circle", "polygon"} and s not in prompts]
+        return prompts
+
+    def _build_interactive_requests(self, refine=False):
+        """One region per object, rather than an automatic search within it."""
+        prompts = self._segmentation_prompts()
+        regions = [s for s in prompts if s.shape_type in {"rectangle", "circle"}]
+        if refine or len(regions) <= 1:
+            return [self._build_segmentation_request(refine=refine)]
+        if any(s.shape_type == "polygon" for s in prompts):
+            raise ValueError("Polygon ROI is for object search, not multiple object prompts.")
+
+        groups = [[] for _ in regions]
+        for point in (s for s in prompts if s.shape_type == "point"):
+            if len(point.points) != 1:
+                raise ValueError("A point prompt must have exactly one coordinate.")
+            # Negative points exclude background for all objects. Assign each
+            # positive point to exactly one region, never silently to two objects.
+            if (point.other_data or {}).get("point_label", 1) == 0:
+                for group in groups:
+                    group.append(point)
+                continue
+            x, y = point.points[0].x(), point.points[0].y()
+            matches = []
+            for index, region in enumerate(regions):
+                if len(region.points) != 2:
+                    raise ValueError("A circle or rectangle needs two coordinates.")
+                a, b = region.points
+                if region.shape_type == "circle":
+                    inside = (x-a.x())**2 + (y-a.y())**2 <= (
+                        (b.x()-a.x())**2 + (b.y()-a.y())**2)
+                else:
+                    inside = (min(a.x(), b.x()) <= x <= max(a.x(), b.x())
+                              and min(a.y(), b.y()) <= y <= max(a.y(), b.y()))
+                if inside:
+                    matches.append(index)
+            if len(matches) != 1:
+                raise ValueError(
+                    "For multiple objects, each positive point must be inside exactly one "
+                    "circle/rectangle. Move ambiguous points, or remove them with Clear prompts.")
+            groups[matches[0]].append(point)
+
+        requests = []
+        for region, points in zip(regions, groups):
+            request = self._build_segmentation_request(prompts_override=[region, *points])
+            # Multiple masks are alternative interpretations of ONE object,
+            # not distinct objects: request one mask per explicit region.
+            requests.append(request.model_copy(update={"return_multiple_masks": False}))
+        return requests
+
+    def _build_segmentation_request(self, mode="interactive", whole_image=False, refine=False,
+                                    prompts_override=None):
+        prompts = (self._segmentation_prompts(mode, whole_image) if prompts_override is None
+                   else prompts_override)
+        regions = [s for s in prompts if s.shape_type in {"rectangle", "circle", "polygon"}]
+        if mode == "automatic" and len(regions) > 1:
+            raise ValueError(
+                "Object search needs one ROI containing many objects. "
+                "For several circles/rectangles (one object each), use Run SAM2.")
         if refine:
             # A large search ROI must not inject positive points into other
             # objects while refining one selected mask. GUI refinement uses
@@ -781,11 +903,13 @@ class MedPhysLabelMeWindow(ProjectWindowMixin, LabelMeMainWindow):
             display=self._current_display(),
         )
 
-    def _start_task(self, operation, kind, request=None):
+    def _start_task(self, operation, kind, request=None, *, cancellable_batch=False):
         if self._job is not None:
             self.statusBar().showMessage("Wait for the pending request, or cancel it.", 4000)
             return
         task = WorkerTask(operation, self)
+        if cancellable_batch:
+            task.operation = lambda: operation(lambda: task.cancelled)
         task.frame_revision = self._frame_revision
         task.image_path = self.imagePath
         task.kind = kind
@@ -831,18 +955,20 @@ class MedPhysLabelMeWindow(ProjectWindowMixin, LabelMeMainWindow):
         box.setDetailedText(text or "(no output: worker is external or not started)")
         box.exec_()
 
-    def _check_worker(self):
-        self._start_task(self.worker_client.healthcheck, "health")
-
     def _run_sam2(self, checked=False, *, refine=False):
         if not self.imagePath:
             return
         try:
-            request = self._build_segmentation_request(refine=refine)
+            requests = self._build_interactive_requests(refine=refine)
         except ValueError as exc:
             QtWidgets.QMessageBox.information(self, "SAM2 prompt", str(exc))
             return
-        self._start_task(lambda: self.worker_client.segment(request), "segment", request)
+        if len(requests) == 1:
+            self._start_task(lambda: self.worker_client.segment(requests[0]), "segment", requests[0])
+        else:
+            self._start_task(
+                lambda cancelled: self.worker_client.segment_many(requests, cancelled=cancelled),
+                "segment", requests[0], cancellable_batch=True)
 
     def _find_objects(self, checked=False, *, whole_image=False):
         if not self.imagePath:
@@ -890,11 +1016,11 @@ class MedPhysLabelMeWindow(ProjectWindowMixin, LabelMeMainWindow):
             self._record_project_model(response.model_info)
             if task.kind == "capabilities":
                 QtWidgets.QMessageBox.information(
-                    self, "Model capabilities",
-                    f"{response.model_name} {response.model_version}\n" +
-                    "\n".join(f"{key}: {'yes' if value else 'no'}" for key, value in response.capabilities.items()))
+                    self, "Model capabilities", format_model_capabilities(response))
+            variant = (response.model_info or {}).get("variant")
             self.statusBar().showMessage(
-                f"Worker: device={response.device}, model_loaded={response.model_loaded}, "
+                (f"Worker: SAM2.1 {variant}, " if variant else "Worker: ") +
+                f"device={response.device}, model_loaded={response.model_loaded}, "
                 f"cache_entries={response.cache_entries}", 7000)
             return
         if not response.ok:
@@ -1386,6 +1512,16 @@ class MedPhysLabelMeWindow(ProjectWindowMixin, LabelMeMainWindow):
             self._capture_project_image()
         except (OSError, ValueError, TypeError):
             self._project_dirty = True
+            if getattr(self, "_navigating_project", False):
+                # Cannot capture the canvas (e.g. unknown class): stay on this frame.
+                QtWidgets.QMessageBox.warning(
+                    self, "Cannot switch frame",
+                    "The current frame cannot be saved to the project. Fix the objects first.")
+                return False
+        if getattr(self, "_navigating_project", False):
+            # The switch itself saves the project (_load_project_image), and
+            # autosave runs in the background: no question per frame.
+            return True
         if not (self.dirty or self._project_dirty):
             return True
         mb = QtWidgets.QMessageBox

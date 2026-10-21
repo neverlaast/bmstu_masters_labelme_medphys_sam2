@@ -89,3 +89,41 @@ class WorkerClient:
         if not result.ok:
             raise WorkerResponseError(result.error_message or "Propagation failed")
         return result
+
+    def segment_many(self, payloads: list[SegmentationRequest], *, cancelled=None
+                     ) -> SegmentationResponse:
+        """Segment explicit objects sequentially with the existing worker API.
+
+        Reuses the image embedding cache, not GPU batching. Return results only
+        after the complete batch succeeds so a failed request preserves previous
+        candidates. Cancellation stops sending subsequent requests; an active
+        remote inference cannot be interrupted.
+        """
+        if not payloads:
+            raise ValueError("At least one object prompt is required.")
+        candidates, warnings, elapsed = [], [], 0.0
+        responses = []
+        for index, payload in enumerate(payloads, 1):
+            if cancelled and cancelled():
+                raise WorkerResponseError("Multiple object request cancelled.")
+            result = self.segment(payload)
+            if not result.ok or result.generation_mode != "interactive":
+                raise WorkerResponseError(f"Object prompt {index}: invalid worker response.")
+            responses.append(result)
+            elapsed += result.elapsed_ms
+            warnings.extend(f"Prompt {index}: {text}" for text in result.warnings)
+            if not result.candidates:
+                warnings.append(f"Prompt {index}: no mask found.")
+                continue
+            # Defensive: older/stub adapters may still return alternatives.
+            best = max(result.candidates, key=lambda c: c.score)
+            candidates.append(best.model_copy(update={
+                "metadata": {**best.metadata, "prompt_index": index,
+                             "prompt_count": len(payloads)},
+            }))
+        return responses[-1].model_copy(update={
+            "candidates": candidates, "elapsed_ms": elapsed,
+            "cache_hit": all(r.cache_hit for r in responses),
+            "api_version": min(r.api_version for r in responses),
+            "warnings": warnings,
+        })

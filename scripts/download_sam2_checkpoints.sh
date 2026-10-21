@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Download SAM2.1 checkpoints from the official Meta server and verify SHA-256.
 #
-#   bash scripts/download_sam2_checkpoints.sh            # small (worker default)
+#   bash scripts/download_sam2_checkpoints.sh            # large (worker default)
 #   bash scripts/download_sam2_checkpoints.sh tiny large
 #   bash scripts/download_sam2_checkpoints.sh all
 #
@@ -31,7 +31,7 @@ sha256() {
 }
 
 models=("$@")
-[ ${#models[@]} -eq 0 ] && models=(small)
+[ ${#models[@]} -eq 0 ] && models=(large)
 [ "${models[0]}" = all ] && models=(tiny small base_plus large)
 
 [ -d "$TARGET" ] || { echo "Missing $TARGET (clone SAM2 first, see README)" >&2; exit 1; }

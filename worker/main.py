@@ -19,6 +19,7 @@ from worker.model_registry import (
     SamInferenceRequest,
     SamPoint,
     create_model_adapter,
+    resolve_sam2_config,
 )
 from worker.postprocess.geometry import circle_to_box
 from worker.adapters import run_adapter, load_trusted_adapter
@@ -33,9 +34,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 DEFAULT_BACKEND = "sam2_real"
 DEFAULT_SAM2_CHECKPOINT_PATH = str(
-    PROJECT_ROOT / "third_party" / "sam2_upstream" / "sam2.1_hiera_small.pt"
+    PROJECT_ROOT / "third_party" / "sam2_upstream" / "sam2.1_hiera_large.pt"
 )
-DEFAULT_SAM2_CONFIG_PATH = "configs/sam2.1/sam2.1_hiera_s.yaml"
+DEFAULT_SAM2_CONFIG_PATH = "configs/sam2.1/sam2.1_hiera_l.yaml"
 
 DEFAULT_DEVICE = detect_best_device()
 
@@ -317,8 +318,16 @@ def main() -> None:
     parser.add_argument("--adapter", help="Explicit trusted installed module:factory, overrides --backend")
     parser.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"], default="auto")
     parser.add_argument("--checkpoint", default=DEFAULT_SAM2_CHECKPOINT_PATH)
-    parser.add_argument("--config", default=DEFAULT_SAM2_CONFIG_PATH)
+    parser.add_argument("--config", default=None,
+                        help="SAM2 config; inferred from the checkpoint name when omitted")
     args = parser.parse_args()
+    if args.adapter is None and args.backend == "sam2_real":
+        try:
+            args.config = resolve_sam2_config(args.checkpoint, args.config)
+        except ValueError as exc:
+            parser.error(str(exc))
+    elif args.config is None:
+        args.config = DEFAULT_SAM2_CONFIG_PATH
     DEFAULT_BACKEND = args.backend
     DEFAULT_DEVICE = detect_best_device() if args.device == "auto" else args.device
     factory = load_trusted_adapter if args.adapter else create_model_adapter
@@ -328,6 +337,9 @@ def main() -> None:
     DEFAULT_BACKEND = MODEL_ADAPTER.get_info().backend
     print(f"Worker listening on http://{args.host}:{args.port}")
     print(f"Backend: {DEFAULT_BACKEND}")
+    variant = getattr(MODEL_ADAPTER.get_info(), "variant", None)
+    if variant:
+        print(f"Model: SAM2.1 {variant}")
     print(f"Checkpoint: {args.checkpoint}")
     print(f"Config: {args.config}")
     print(f"Device: {DEFAULT_DEVICE}")
