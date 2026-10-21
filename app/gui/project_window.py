@@ -65,6 +65,8 @@ class ProjectWindowMixin:
         self._class_shortcuts = []
 
     def _class_hotkey(self, name):
+        if not self._resolve_property_draft():
+            return
         shapes = self._get_selected_final_shapes()
         if not shapes:
             self.statusBar().showMessage("Select final objects to assign this class", 3000)
@@ -100,6 +102,8 @@ class ProjectWindowMixin:
         self._project_timer.timeout.connect(self._project_autosave)
 
     def _guard_project_operation(self):
+        if not self._resolve_property_draft():
+            raise ValueError("Object property editing was cancelled.")
         if self._job is not None:
             raise ValueError("Wait for the model request to finish before changing the project")
         if getattr(self, "_exclusive_io", None) is not None:
@@ -349,6 +353,8 @@ class ProjectWindowMixin:
             self.statusBar().showMessage(f"Stored display settings ignored: {exc}", 8000)
 
     def _load_project_image(self, filename, capture=True):
+        if not self._resolve_property_draft():
+            return False
         path = Path(filename).resolve()
         target = next((image for image in self._project.images
                        if resolve_image(self._project_path, image) == path), None)
@@ -405,6 +411,7 @@ class ProjectWindowMixin:
             self.toggleActions(True)
             self.setClean()
             self._history.reset(self.canvas.shapes)
+            self._reset_object_edit_tracking()
             self._refresh_views()
             self._set_project_image_list()
             self.canvas.setFocus()
@@ -413,6 +420,8 @@ class ProjectWindowMixin:
         return True
 
     def _save_project(self, checked=False):
+        if not self._resolve_property_draft():
+            return False
         if self._project is None:
             return False
         self._finish_pending_autosave()

@@ -32,6 +32,7 @@ from labelme.label_file import LabelFile
 
 from app.core.history import SnapshotHistory
 from app.gui.worker_task import WorkerTask
+from app.gui.object_properties_window import ObjectPropertiesMixin
 from app.worker_api.client import WorkerClient
 from app.worker_api.schemas import (
     BoxPrompt, CirclePrompt, PointPrompt, PolygonPrompt, GenerationOptions, SegmentationRequest,
@@ -104,7 +105,7 @@ def format_model_capabilities(response) -> str:
 logger = logging.getLogger(__name__)
 
 
-class MedPhysLabelMeWindow(ProjectWindowMixin, LabelMeMainWindow):
+class MedPhysLabelMeWindow(ObjectPropertiesMixin, ProjectWindowMixin, LabelMeMainWindow):
     SAM2_CANDIDATE_COLORS = [
         (231, 76, 60), (52, 152, 219), (46, 204, 113), (241, 196, 15),
         (155, 89, 182), (230, 126, 34), (26, 188, 156), (236, 112, 99),
@@ -141,11 +142,13 @@ class MedPhysLabelMeWindow(ProjectWindowMixin, LabelMeMainWindow):
         self._install_display_menu()
         self._install_project_menu()
         self._install_video_entry()
+        self._install_object_properties()
         self.labelList.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.labelList.customContextMenuRequested.connect(self._show_label_list_context_menu)
         # Upstream already connected itemSelectionChanged to our override.
         self._initializing = False
         self._history.reset(self.canvas.shapes)
+        self._reset_object_edit_tracking()
         self._refresh_views()
 
     @staticmethod
@@ -654,6 +657,11 @@ class MedPhysLabelMeWindow(ProjectWindowMixin, LabelMeMainWindow):
         if self._syncing:
             return
         selected = [s for s in selected_shapes if s in self.canvas.shapes]
+        panel = getattr(self, "_properties_panel", None)
+        if (panel is not None and panel.dirty
+                and (len(selected) != 1 or selected[0] is not panel.target)
+                and not self._resolve_property_draft()):
+            selected = [panel.target] if panel.target in self.canvas.shapes else []
         self._syncing = True
         self._noSelectionSlot = True
         blockers = [QtCore.QSignalBlocker(self.labelList)]
@@ -691,6 +699,7 @@ class MedPhysLabelMeWindow(ProjectWindowMixin, LabelMeMainWindow):
         self.actions.copy.setEnabled(bool(finals))
         self.actions.duplicate.setEnabled(bool(finals))
         self.actions.edit.setEnabled(len(finals) == 1 and len(selected) == 1)
+        self._refresh_object_properties()
         self.canvas.update()
 
     def labelSelectionChanged(self, *args):
@@ -1186,6 +1195,8 @@ class MedPhysLabelMeWindow(ProjectWindowMixin, LabelMeMainWindow):
         self._accept_candidates(list(self._iter_sam2_candidate_shapes()))
 
     def _remove_shapes(self, shapes):
+        if not self._resolve_property_draft():
+            return 0
         ids = {id(s) for s in shapes}
         if not ids:
             return 0
@@ -1229,6 +1240,8 @@ class MedPhysLabelMeWindow(ProjectWindowMixin, LabelMeMainWindow):
             self._remove_shapes(self.canvas.selectedShapes)
 
     def _relabel_selected_final_shapes(self):
+        if not self._resolve_property_draft():
+            return
         selected = self._get_selected_final_shapes()
         if not selected:
             return
@@ -1268,6 +1281,8 @@ class MedPhysLabelMeWindow(ProjectWindowMixin, LabelMeMainWindow):
         self.setDirty()
 
     def copySelectedShape(self):
+        if not self._resolve_property_draft():
+            return
         self._copied_shapes = [s.copy() for s in self._get_selected_final_shapes()]
         self.actions.paste.setEnabled(bool(self._copied_shapes))
 
@@ -1283,6 +1298,8 @@ class MedPhysLabelMeWindow(ProjectWindowMixin, LabelMeMainWindow):
         self.setDirty()
 
     def duplicateSelectedShape(self):
+        if not self._resolve_property_draft():
+            return
         self.shapeSelectionChanged(self._get_selected_final_shapes())
         super().duplicateSelectedShape()
         self._refresh_views()
@@ -1293,7 +1310,11 @@ class MedPhysLabelMeWindow(ProjectWindowMixin, LabelMeMainWindow):
             for shape in self.canvas.shapes:
                 data = shape.other_data or {}
                 outline = data.get("mask_outline")
-                if outline is not None and outline != [[p.x(),p.y()] for p in shape.points]:
+                points = tuple((p.x(), p.y()) for p in shape.points)
+                previous = getattr(self, "_object_edit_signatures", {}).get(data.get("object_id"))
+                geometry_changed = previous is None or previous[4] != points
+                if (outline is not None and outline != [[x, y] for x, y in points]
+                        and (not data.get("geometry_modified") or geometry_changed)):
                     # A raster prediction must not silently remain ground
                     # truth after manual vector edits.
                     if data.get("refinement_token") == self._refinement_token:
@@ -1316,7 +1337,8 @@ class MedPhysLabelMeWindow(ProjectWindowMixin, LabelMeMainWindow):
                         definition = next((c for c in self._project.classes if c.name == shape.label), None)
                         if definition is not None:
                             shape.other_data["class_id"] = definition.id
-                        shape.other_data.setdefault("modified_at", datetime.now(timezone.utc).isoformat())
+            if not self._project_loading:
+                self._update_object_edit_timestamps()
             self._history.commit(self.canvas.shapes)
             if self._project is not None and not self._project_loading:
                 self._project_dirty = True
@@ -1327,6 +1349,8 @@ class MedPhysLabelMeWindow(ProjectWindowMixin, LabelMeMainWindow):
             self.actions.save.setEnabled(True)
             QtWidgets.QMessageBox.warning(self, "Autosave failed", str(exc))
         self._update_history_actions()
+        if not self._initializing:
+            self._refresh_object_properties()
 
     def _update_history_actions(self):
         if not self._initializing:
@@ -1336,6 +1360,7 @@ class MedPhysLabelMeWindow(ProjectWindowMixin, LabelMeMainWindow):
     def _restore_history(self, shapes):
         if shapes is None:
             return
+        selected_ids = {(s.other_data or {}).get("object_id") for s in self.canvas.selectedShapes}
         self._restoring = True
         try:
             self.canvas.selectedShapes = []
@@ -1344,21 +1369,27 @@ class MedPhysLabelMeWindow(ProjectWindowMixin, LabelMeMainWindow):
             self.canvas.hVertex = self.canvas.prevhVertex = None
             self.canvas.current = None
             self.canvas.shapes = shapes
+            self._reset_object_edit_tracking()
             # Maintain upstream geometry backups without using them as the
             # application history (which also includes labels and metadata).
             self.canvas.shapesBackups = []
             self.canvas.storeShapes()
             self._refresh_views()
+            self.shapeSelectionChanged([
+                s for s in self.canvas.shapes if (s.other_data or {}).get("object_id") in selected_ids
+            ])
             self.setDirty()
         finally:
             self._restoring = False
         self._update_history_actions()
 
     def undoShapeEdit(self):
-        self._restore_history(self._history.undo())
+        if self._resolve_property_draft():
+            self._restore_history(self._history.undo())
 
     def redoShapeEdit(self):
-        self._restore_history(self._history.redo())
+        if self._resolve_property_draft():
+            self._restore_history(self._history.redo())
 
     def resetState(self):
         self._frame_revision += 1
@@ -1368,6 +1399,7 @@ class MedPhysLabelMeWindow(ProjectWindowMixin, LabelMeMainWindow):
         self._refinement_token = self._refinement_source_id = None
         super().resetState()
         self._history.reset([])
+        self._reset_object_edit_tracking()
         if not self._initializing:
             self._refresh_views()
 
@@ -1398,6 +1430,8 @@ class MedPhysLabelMeWindow(ProjectWindowMixin, LabelMeMainWindow):
         super().dropEvent(event)
 
     def loadFile(self, filename=None):
+        if not self._initializing and not self._resolve_property_draft():
+            return False
         if filename and not self._initializing and is_video(filename) and Path(filename).is_file():
             # File > Open, recent files, drag-and-drop, file list: videos go to the importer.
             QtCore.QTimer.singleShot(0, lambda: self._import_video_dialog(path=str(filename)))
@@ -1422,11 +1456,14 @@ class MedPhysLabelMeWindow(ProjectWindowMixin, LabelMeMainWindow):
                 return False
         result = super().loadFile(filename)
         self._history.reset(self.canvas.shapes)
+        self._reset_object_edit_tracking()
         if not self._initializing:
             self._refresh_views()
         return result
 
     def saveLabels(self, filename):
+        if not self._resolve_property_draft():
+            return False
         if self._project is not None:
             return self._save_project()
         # Serialize only final objects. Own I/O also closes/flushed files
@@ -1489,11 +1526,15 @@ class MedPhysLabelMeWindow(ProjectWindowMixin, LabelMeMainWindow):
             return False
 
     def saveFile(self, _value=False):
+        if not self._resolve_property_draft():
+            return False
         if self._project is not None:
             return self._save_project()
         return super().saveFile(_value)
 
     def saveFileAs(self, _value=False):
+        if not self._resolve_property_draft():
+            return False
         if self._project is not None:
             return self._save_project_as()
         return super().saveFileAs(_value)
@@ -1506,6 +1547,8 @@ class MedPhysLabelMeWindow(ProjectWindowMixin, LabelMeMainWindow):
         return super().importDirImages(dirpath, pattern, load)
 
     def mayContinue(self):
+        if not self._resolve_property_draft():
+            return False
         if self._project is None:
             return super().mayContinue()
         try:
