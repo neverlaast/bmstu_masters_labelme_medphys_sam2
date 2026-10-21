@@ -1,0 +1,25 @@
+.venv/
+.idea/
+.DS_Store
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+_recovery/
+logs/*
+*.pt
+*.pth
+*.ckpt
+.env
+.env.*
+
+# Internal working documents (not published)
+docs/CHANGELOG.md
+docs/project_state.md
+docs/upstream_vs_custom.md
+
+# Accidental self-referencing symlink
+third_party/third_party

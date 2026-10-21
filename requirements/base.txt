@@ -1,0 +1,13 @@
+PyQt5>=5.15
+numpy>=1.24
+opencv-python>=4.8
+pydantic>=2.5,<3
+PyYAML>=6.0
+requests>=2.31
+imgviz>=0.11
+matplotlib
+natsort>=7.1.0
+Pillow>=2.8
+qtpy!=1.11.2
+termcolor
+tifffile>=2023.7  # multichannel/high-bit-depth TIFF

@@ -1,0 +1,327 @@
+{
+  "$defs": {
+    "Annotation": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "class_id": {
+          "minLength": 1,
+          "title": "Class Id",
+          "type": "string"
+        },
+        "shape_type": {
+          "enum": [
+            "polygon",
+            "rectangle",
+            "circle",
+            "line",
+            "linestrip",
+            "point"
+          ],
+          "title": "Shape Type",
+          "type": "string"
+        },
+        "points": {
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "type": "array"
+          },
+          "title": "Points",
+          "type": "array"
+        },
+        "group_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Group Id"
+        },
+        "description": {
+          "default": "",
+          "title": "Description",
+          "type": "string"
+        },
+        "flags": {
+          "additionalProperties": {
+            "type": "boolean"
+          },
+          "title": "Flags",
+          "type": "object"
+        },
+        "attributes": {
+          "additionalProperties": true,
+          "title": "Attributes",
+          "type": "object"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "title": "Metadata",
+          "type": "object"
+        },
+        "modified_at": {
+          "title": "Modified At",
+          "type": "string"
+        },
+        "review_status": {
+          "default": "unreviewed",
+          "title": "Review Status",
+          "type": "string"
+        },
+        "source": {
+          "default": "manual",
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "class_id",
+        "shape_type",
+        "points"
+      ],
+      "title": "Annotation",
+      "type": "object"
+    },
+    "ClassDefinition": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "color": {
+          "default": "#ff5050",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "title": "Color",
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "title": "Description",
+          "type": "string"
+        },
+        "attributes": {
+          "additionalProperties": true,
+          "title": "Attributes",
+          "type": "object"
+        },
+        "allowed_geometry": {
+          "items": {
+            "enum": [
+              "polygon",
+              "rectangle",
+              "circle",
+              "line",
+              "linestrip",
+              "point"
+            ],
+            "type": "string"
+          },
+          "title": "Allowed Geometry",
+          "type": "array"
+        },
+        "shortcut": {
+          "default": "",
+          "title": "Shortcut",
+          "type": "string"
+        },
+        "active": {
+          "default": true,
+          "title": "Active",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "ClassDefinition",
+      "type": "object"
+    },
+    "ImageRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "path": {
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "width": {
+          "exclusiveMinimum": 0,
+          "title": "Width",
+          "type": "integer"
+        },
+        "height": {
+          "exclusiveMinimum": 0,
+          "title": "Height",
+          "type": "integer"
+        },
+        "annotations": {
+          "items": {
+            "$ref": "#/$defs/Annotation"
+          },
+          "title": "Annotations",
+          "type": "array"
+        },
+        "flags": {
+          "additionalProperties": {
+            "type": "boolean"
+          },
+          "title": "Flags",
+          "type": "object"
+        },
+        "display": {
+          "additionalProperties": true,
+          "title": "Display",
+          "type": "object"
+        },
+        "normalization": {
+          "additionalProperties": true,
+          "title": "Normalization",
+          "type": "object"
+        }
+      },
+      "required": [
+        "path",
+        "sha256",
+        "width",
+        "height"
+      ],
+      "title": "ImageRecord",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "format": {
+      "const": "medphys-project",
+      "default": "medphys-project",
+      "title": "Format",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "id": {
+      "title": "Id",
+      "type": "string"
+    },
+    "name": {
+      "default": "Untitled project",
+      "title": "Name",
+      "type": "string"
+    },
+    "created_at": {
+      "title": "Created At",
+      "type": "string"
+    },
+    "modified_at": {
+      "title": "Modified At",
+      "type": "string"
+    },
+    "images": {
+      "items": {
+        "$ref": "#/$defs/ImageRecord"
+      },
+      "title": "Images",
+      "type": "array"
+    },
+    "classes": {
+      "items": {
+        "$ref": "#/$defs/ClassDefinition"
+      },
+      "title": "Classes",
+      "type": "array"
+    },
+    "sam_settings": {
+      "additionalProperties": true,
+      "title": "Sam Settings",
+      "type": "object"
+    },
+    "export_profiles": {
+      "additionalProperties": true,
+      "title": "Export Profiles",
+      "type": "object"
+    },
+    "import_profiles": {
+      "additionalProperties": true,
+      "title": "Import Profiles",
+      "type": "object"
+    },
+    "model_records": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Model Records",
+      "type": "array"
+    },
+    "journal": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Journal",
+      "type": "array"
+    },
+    "cache_policy": {
+      "additionalProperties": true,
+      "title": "Cache Policy",
+      "type": "object"
+    },
+    "autosave_seconds": {
+      "default": 60,
+      "maximum": 3600,
+      "minimum": 10,
+      "title": "Autosave Seconds",
+      "type": "integer"
+    },
+    "backup_count": {
+      "default": 10,
+      "maximum": 100,
+      "minimum": 1,
+      "title": "Backup Count",
+      "type": "integer"
+    }
+  },
+  "title": "Project",
+  "type": "object"
+}

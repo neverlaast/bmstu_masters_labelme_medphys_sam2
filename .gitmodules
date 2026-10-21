@@ -1,0 +1,4 @@
+[submodule "third_party/sam2_upstream"]
+	path = third_party/sam2_upstream
+	url = https://github.com/facebookresearch/sam2.git
+	ignore = untracked
