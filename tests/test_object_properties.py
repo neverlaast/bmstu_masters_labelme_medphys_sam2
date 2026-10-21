@@ -2,7 +2,7 @@
 from copy import deepcopy
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import unittest
 
 from PIL import Image
@@ -10,6 +10,7 @@ from qtpy import QtCore, QtWidgets
 
 import test_gui as helpers
 from app.gui.object_properties import parse_attributes
+from app.gui.object_properties_window import ObjectPropertiesMixin
 from project_format.classes import add_class
 from project_format.models import ClassDefinition
 from project_format.io import load_project
@@ -66,6 +67,79 @@ class ObjectPropertiesTests(unittest.TestCase):
         self.assertTrue(self.panel.metrics.isReadOnly())
         self.assertIn("Object properties", [a.text() for a in self.window.menus.view.actions()])
         self.assertEqual(self.panel.readonly["image"].text(), self.image_path.name)
+
+    def test_compact_layout_keeps_actions_visible_with_expanded_details(self):
+        self.select(self.final())
+        self.window.resize(1000, 700)
+        self.window.show()
+        self.application.processEvents()
+        self.window._properties_dock.raise_()
+        self.panel.details_toggle.setChecked(True)
+        self.application.processEvents()
+        scroll = self.window._properties_scroll
+        scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum())
+        self.application.processEvents()
+        self.assertIn(self.window._properties_dock,
+                      self.window.tabifiedDockWidgets(self.window.shape_dock))
+        self.assertNotIn(self.window._properties_dock,
+                         self.window.tabifiedDockWidgets(self.window.flag_dock))
+        self.assertLess(self.window._properties_dock.minimumHeight(), 200)
+        self.assertIsNot(self.panel.action_bar.parent(), self.panel)
+        self.assertTrue(self.panel.apply_button.isVisible())
+        self.assertTrue(self.panel.reset_button.isVisible())
+        self.assertLess(self.window._properties_dock.width(), 420)
+        self.assertGreater(self.window.file_dock.height(), 60)
+
+    def test_reset_layout_preserves_draft_and_annotations(self):
+        shape = self.final()
+        self.select(shape)
+        self.panel.description.setPlainText("keep draft")
+        before = deepcopy(shape.other_data)
+        self.window._reset_annotation_panel_layout()
+        self.assertTrue(self.panel.dirty)
+        self.assertEqual(self.panel.description.toPlainText(), "keep draft")
+        self.assertEqual(shape.other_data, before)
+
+    def test_saved_new_layout_is_restored_without_resetting_it(self):
+        self.window._reset_annotation_panel_layout()
+        state = self.window.saveState()
+        settings = Mock()
+        settings.value.side_effect = lambda key, default=None: (
+            state if key == "window/state" else default)
+        other = None
+        try:
+            with patch.object(QtCore, "QSettings", return_value=settings), \
+                    patch.object(ObjectPropertiesMixin, "_reset_annotation_panel_layout") as reset:
+                other = helpers.MedPhysLabelMeWindow(config=deepcopy(self.window._config))
+                self.application.processEvents()
+                reset.assert_not_called()
+                self.assertIn(other._properties_dock,
+                              other.tabifiedDockWidgets(other.shape_dock))
+        finally:
+            if other is not None:
+                other.deleteLater()
+                self.application.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+
+    def test_legacy_flags_tab_layout_is_migrated(self):
+        self.window.tabifyDockWidget(self.window.flag_dock, self.window._properties_dock)
+        self.window.flag_dock.show()
+        state = self.window.saveState()
+        settings = Mock()
+        settings.value.side_effect = lambda key, default=None: (
+            state if key == "window/state" else default)
+        other = None
+        try:
+            with patch.object(QtCore, "QSettings", return_value=settings):
+                other = helpers.MedPhysLabelMeWindow(config=deepcopy(self.window._config))
+                self.application.processEvents()
+                self.assertIn(other._properties_dock,
+                              other.tabifiedDockWidgets(other.shape_dock))
+                self.assertNotIn(other._properties_dock,
+                                 other.tabifiedDockWidgets(other.flag_dock))
+        finally:
+            if other is not None:
+                other.deleteLater()
+                self.application.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
 
     def test_modified_time_changes_only_for_edited_objects_and_undo_restores_it(self):
         a, b = self.final(), self.final(offset=35)

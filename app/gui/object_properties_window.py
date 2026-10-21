@@ -48,21 +48,57 @@ class ObjectPropertiesMixin:
         panel = ObjectPropertiesPanel(self)
         dock = QtWidgets.QDockWidget("Object properties", self)
         dock.setObjectName("MedPhysObjectProperties")
-        scroll = QtWidgets.QScrollArea(dock)
+        container = QtWidgets.QWidget(dock)
+        layout = QtWidgets.QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        scroll = QtWidgets.QScrollArea(container)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         scroll.setWidgetResizable(True)
         scroll.setWidget(panel)
-        dock.setWidget(scroll)
-        dock.setMinimumWidth(290)
-        dock.setMinimumHeight(380)
+        layout.addWidget(scroll, 1)
+        # Actions stay visible while the fields/details scroll independently.
+        panel.layout().removeWidget(panel.action_bar)
+        layout.addWidget(panel.action_bar)
+        dock.setWidget(container)
+        dock.setMinimumWidth(240)
+        self._properties_scroll = scroll
         self._properties_panel, self._properties_dock = panel, dock
         self._properties_applying = False
-        self.addDockWidget(QtCore.Qt.RightDockWidgetArea, dock)
-        self.tabifyDockWidget(self.flag_dock, dock)
-        self.resizeDocks([dock], [450], QtCore.Qt.Vertical)
-        dock.raise_()
+        restored = self.restoreDockWidget(dock)
+        if not restored:
+            self.addDockWidget(QtCore.Qt.RightDockWidgetArea, dock)
+        legacy_layout = self.flag_dock in self.tabifiedDockWidgets(dock)
+        if not restored or legacy_layout:
+            self.tabifyDockWidget(self.shape_dock, dock)
+            self.shape_dock.raise_()
         self.menus.view.addAction(dock.toggleViewAction())
+        action = QtWidgets.QAction("Reset annotation panel layout", self)
+        action.triggered.connect(self._reset_annotation_panel_layout)
+        self.menus.view.addAction(action)
+        # Migrate the old Flags-tab layout once. A subsequently saved layout
+        # restores the late-created dock without overriding user preferences.
+        if not restored or legacy_layout:
+            QtCore.QTimer.singleShot(0, self._reset_annotation_panel_layout)
         panel.apply_requested.connect(self._apply_object_properties)
         panel.reset_requested.connect(lambda: self._refresh_object_properties(force=True))
+
+    def _reset_annotation_panel_layout(self):
+        docks = [self.flag_dock, self.label_dock, self.shape_dock,
+                 self.file_dock, self._properties_dock]
+        for dock in docks:
+            dock.setFloating(False)
+            self.addDockWidget(QtCore.Qt.RightDockWidgetArea, dock)
+        self.tabifyDockWidget(self.shape_dock, self._properties_dock)
+        for dock in (self.label_dock, self.shape_dock, self.file_dock, self._properties_dock):
+            dock.show()
+        self.flag_dock.setVisible(bool(self._config.get("flags")))
+        self.resizeDocks([self.shape_dock], [320], QtCore.Qt.Horizontal)
+        self.resizeDocks(
+            [self.flag_dock, self.label_dock, self.shape_dock, self.file_dock],
+            [60, 90, 300, 170], QtCore.Qt.Vertical)
+        self.shape_dock.raise_()
 
     def _object_property_context(self, shape):
         data = shape.other_data or {}
@@ -118,7 +154,7 @@ class ObjectPropertiesMixin:
         elif self._is_sam2_prompt(shape):
             summary = "Temporary prompt (read-only). It is not a final annotation."
         else:
-            summary = "One final object selected. Apply commits all property changes together."
+            summary = "Edit this object, then Apply."
         panel.bind(shape, context=self._object_property_context(shape), classes=classes,
                    editable=not temporary, allow_new_class=self._project is None,
                    summary=summary, force=force)
