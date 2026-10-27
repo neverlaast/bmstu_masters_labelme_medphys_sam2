@@ -13,7 +13,7 @@ from app.worker_api.schemas import GenerationOptions
 from worker.postprocess.geometry import mask_to_polygon
 from worker.postprocess.masks import (
     PackedMask, grid_points, largest_component, mask_iou, mask_rle,
-    metrics, passes_filters, polygon_mask, roi_mask,
+    metrics, passes_filters, roi_mask,
 )
 
 
@@ -83,7 +83,7 @@ def predict(adapter, request, prepared=None):
     if not np.any(roi):
         raise ValueError("ROI does not intersect the image.")
     existing = [
-        PackedMask.from_mask(polygon_mask((height, width), points))
+        PackedMask.from_polygon((height, width), points)
         for points in request.generation_params.get("existing_polygons", [])
     ]
     warnings = []

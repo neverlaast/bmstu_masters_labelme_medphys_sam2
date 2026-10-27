@@ -314,6 +314,17 @@ class GUITests(unittest.TestCase):
         self.assertEqual(target.read_bytes(), original)
         self.assertTrue(self.window.dirty)
 
+    def test_worker_ready_does_not_hide_pending_request_status(self):
+        from unittest.mock import Mock
+        self.window.worker_manager = Mock(state="ready")
+        self.window._worker_status = QtWidgets.QLabel()
+        self.window._job = Mock()
+        self.window._update_worker_status()
+        self.assertEqual(self.window._worker_status.text(), "SAM2: processing")
+        self.window._job = None
+        self.window._update_worker_status()
+        self.assertEqual(self.window._worker_status.text(), "SAM2: ready")
+
     def test_background_request_keeps_event_loop_responsive(self):
         self.prompt("circle")
         response = SegmentationResponse(

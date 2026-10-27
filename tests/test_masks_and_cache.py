@@ -11,7 +11,7 @@ from PIL import Image
 from app.worker_api.schemas import GenerationOptions, CandidateFilters
 from worker.cache.embedding_cache import EmbeddingCache
 from worker.model_registry import SamInferenceRequest, SamBox, SamModelInfo, SamPoint
-from worker.postprocess.masks import PackedMask, mask_iou, roi_mask, grid_points, metrics, mask_rle
+from worker.postprocess.masks import PackedMask, mask_iou, roi_mask, grid_points, metrics, mask_rle, polygon_mask
 from worker.predictors.sam2_predictor import predict
 
 
@@ -32,6 +32,37 @@ class CacheTests(unittest.TestCase):
 
 
 class MaskTests(unittest.TestCase):
+    def test_cropped_polygons_match_full_raster_and_exact_iou(self):
+        rng = np.random.default_rng(4)
+        shape = (73, 91)
+        polygons = [
+            [[-10, -5], [20, 0], [10, 25]],
+            [[12, 20], [40, 20], [40, 45], [12, 45]],
+            [[-30, -30], [-20, -20], [-10, -30]],
+            [],
+        ] + [rng.integers(-15, 105, size=(6, 2)).tolist() for _ in range(30)]
+        for points in polygons:
+            original = PackedMask.from_mask(polygon_mask(shape, points))
+            cropped = PackedMask.from_polygon(shape, points)
+            np.testing.assert_array_equal(cropped.unpack(), original.unpack())
+            self.assertEqual(cropped.area, original.area)
+            self.assertEqual(cropped.bbox, original.bbox)
+            other_points = [[10, 10], [65, 15], [60, 55], [5, 45]]
+            other_full = PackedMask.from_mask(polygon_mask(shape, other_points))
+            other_crop = PackedMask.from_polygon(shape, other_points)
+            expected = mask_iou(original, other_full)
+            self.assertAlmostEqual(mask_iou(cropped, other_full), expected)
+            self.assertAlmostEqual(mask_iou(original, other_crop), expected)
+            self.assertAlmostEqual(mask_iou(cropped, other_crop), expected)
+
+    def test_polygon_storage_does_not_scale_with_full_image_area(self):
+        shape = (100000, 100000)
+        a = PackedMask.from_polygon(shape, [[30, 40], [40, 40], [40, 50], [30, 50]])
+        b = PackedMask.from_polygon(shape, [[35, 45], [45, 45], [45, 55], [35, 55]])
+        self.assertEqual(a.area, 121)
+        self.assertLess(a.bits.nbytes, 32)
+        self.assertAlmostEqual(mask_iou(a, b), 36/(121+121-36))
+
     def test_exact_mask_iou_not_bbox_iou(self):
         a = np.eye(10, dtype=bool)
         b = np.fliplr(a)

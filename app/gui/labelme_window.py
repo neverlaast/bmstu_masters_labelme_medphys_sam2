@@ -260,6 +260,8 @@ class MedPhysLabelMeWindow(ObjectPropertiesMixin, ProjectWindowMixin, LabelMeMai
         menu = self.menuBar().addMenu("Batch")
         self._action(menu, "Select all final annotations", self._select_all_final, "Ctrl+A")
         self._action(menu, "Select final annotations by class", self._select_by_class)
+        self._action(menu, "Hide objects by class...", lambda: self._choose_class_visibility(False))
+        self._action(menu, "Show objects by class...", lambda: self._choose_class_visibility(True))
         self._action(menu, "Select final objects inside ROI (centroids)", self._select_in_roi)
         self._action(menu, "Delete selected annotations", self._delete_selected_final_shapes)
         self._action(menu, "Relabel selected annotations", self._relabel_selected_final_shapes)
@@ -649,9 +651,65 @@ class MedPhysLabelMeWindow(ObjectPropertiesMixin, ProjectWindowMixin, LabelMeMai
             del blockers
             self._noSelectionSlot = False
             self._syncing = False
-        self.shapeSelectionChanged(selected)
+        self._apply_class_visibility()
+        self.shapeSelectionChanged([s for s in selected if self.canvas.isVisible(s)])
         self._update_history_actions()
         self.canvas.update()
+
+    def _apply_class_visibility(self):
+        hidden = getattr(self, "_hidden_annotation_classes", set())
+        for item in self.labelList:
+            shape = item.shape()
+            if not self._is_temporary(shape) and shape.label in hidden:
+                item.setCheckState(QtCore.Qt.Unchecked)
+                self.canvas.setShapeVisible(shape, False)
+
+    def _choose_class_visibility(self, visible):
+        classes = {s.label for s in self.canvas.shapes
+                   if not self._is_temporary(s)}
+        if visible:
+            classes.update(getattr(self, "_hidden_annotation_classes", set()))
+        if not classes:
+            QtWidgets.QMessageBox.information(
+                self, "Object visibility", "No final object classes to show or hide.")
+            return
+        title = "Show objects by class" if visible else "Hide objects by class"
+        label, accepted = QtWidgets.QInputDialog.getItem(
+            self, title, "Class:", sorted(classes), 0, False)
+        if accepted:
+            self._set_class_visibility(label, visible)
+
+    def _set_class_visibility(self, label, visible):
+        shapes = [s for s in self.canvas.shapes
+                  if not self._is_temporary(s) and s.label == label]
+        shape_ids = {id(s) for s in shapes}
+        selected = list(self.canvas.selectedShapes)
+        if (not visible and any(id(s) in shape_ids for s in selected)
+                and not self._resolve_property_draft()):
+            return 0
+        # Saving a pending draft may have reassigned the selected object's class.
+        shapes = [s for s in self.canvas.shapes
+                  if not self._is_temporary(s) and s.label == label]
+        shape_ids = {id(s) for s in shapes}
+        selected = list(self.canvas.selectedShapes)
+        # A window-local display rule, not an annotation/property modification.
+        hidden = set(getattr(self, "_hidden_annotation_classes", set()))
+        if visible:
+            hidden.discard(label)
+        else:
+            hidden.add(label)
+        self._hidden_annotation_classes = hidden
+        for item in self.labelList:
+            if id(item.shape()) in shape_ids:
+                item.setCheckState(QtCore.Qt.Checked if visible else QtCore.Qt.Unchecked)
+        for shape in shapes:
+            self.canvas.setShapeVisible(shape, visible)
+        self.shapeSelectionChanged([s for s in selected if self.canvas.isVisible(s)])
+        self.labelList.viewport().update()
+        self.canvas.update()
+        verb = "Shown" if visible else "Hidden"
+        self.statusBar().showMessage(f"{verb} {len(shapes)} object(s) of class {label}.", 5000)
+        return len(shapes)
 
     def shapeSelectionChanged(self, selected_shapes):
         if self._syncing:
@@ -931,6 +989,7 @@ class MedPhysLabelMeWindow(ObjectPropertiesMixin, ProjectWindowMixin, LabelMeMai
         self._job = task
         self._run_action.setEnabled(False)
         self._cancel_action.setEnabled(True)
+        self._update_worker_status()
         self.statusBar().showMessage("SAM2 request running; the interface remains available.")
         task.start()
 
@@ -944,9 +1003,21 @@ class MedPhysLabelMeWindow(ObjectPropertiesMixin, ProjectWindowMixin, LabelMeMai
         manager.ensure_running()
 
     def _on_worker_state(self, state, message):
-        self._worker_status.setText(f"SAM2: {state}")
-        self._worker_status.setToolTip(message)
+        self._update_worker_status()
         self.statusBar().showMessage(message, 6000)
+
+    def _update_worker_status(self):
+        label = getattr(self, "_worker_status", None)
+        if label is None:
+            return
+        if self._job is not None:
+            label.setText("SAM2: processing")
+            label.setToolTip("A worker request is pending. Wait for the result or cancel it.")
+        else:
+            manager = getattr(self, "worker_manager", None)
+            state = manager.state if manager is not None else "external"
+            label.setText(f"SAM2: {state}")
+            label.setToolTip("Worker availability; ready does not measure model inference speed.")
 
     def _restart_worker(self):
         manager = getattr(self, "worker_manager", None)
@@ -1077,6 +1148,7 @@ class MedPhysLabelMeWindow(ObjectPropertiesMixin, ProjectWindowMixin, LabelMeMai
             self._job = None
             self._run_action.setEnabled(True)
             self._cancel_action.setEnabled(False)
+            self._update_worker_status()
         task.deleteLater()
 
     def _cancel_sam2(self):

@@ -16,6 +16,7 @@ class PackedMask:
     bits: np.ndarray
     area: int
     bbox: tuple | None = None
+    crop_box: tuple | None = None  # Storage window in full-image coordinates.
 
     @classmethod
     def from_mask(cls, mask):
@@ -25,7 +26,42 @@ class PackedMask:
         return cls(mask.shape, np.packbits(mask.reshape(-1)), len(xs), bbox)
 
     def unpack(self):
-        return np.unpackbits(self.bits, count=int(np.prod(self.shape))).reshape(self.shape).astype(bool)
+        if self.crop_box is None:
+            return np.unpackbits(self.bits, count=int(np.prod(self.shape))).reshape(self.shape).astype(bool)
+        x1, y1, x2, y2 = self.crop_box
+        mask = np.zeros(self.shape, bool)
+        if x2 > x1 and y2 > y1:
+            mask[y1:y2, x1:x2] = np.unpackbits(
+                self.bits, count=(y2-y1)*(x2-x1)).reshape(y2-y1, x2-x1).astype(bool)
+        return mask
+
+    @classmethod
+    def from_polygon(cls, shape, points):
+        """Rasterize only clipped polygon bounds, never an image per object."""
+        height, width = shape
+        if len(points) < 3:
+            return cls(shape, np.empty(0, np.uint8), 0, crop_box=(0, 0, 0, 0))
+        vertices = np.rint(points).astype(np.int32)
+        x1 = max(0, int(vertices[:, 0].min()))
+        y1 = max(0, int(vertices[:, 1].min()))
+        x2 = min(width, int(vertices[:, 0].max())+1)
+        y2 = min(height, int(vertices[:, 1].max())+1)
+        if x2 <= x1 or y2 <= y1:
+            return cls(shape, np.empty(0, np.uint8), 0, crop_box=(0, 0, 0, 0))
+        local = cls.from_mask(polygon_mask(
+            (y2-y1, x2-x1), vertices - np.array([x1, y1], dtype=np.int32)))
+        bbox = None if local.bbox is None else (
+            local.bbox[0]+x1, local.bbox[1]+y1,
+            local.bbox[2]+x1, local.bbox[3]+y1)
+        crop = None if (x1, y1, x2, y2) == (0, 0, width, height) else (x1, y1, x2, y2)
+        return cls(shape, local.bits, local.area, bbox, crop)
+
+
+def _bits_in_window(mask, x1, y1, x2, y2):
+    sx, sy, ex, _ = mask.crop_box or (0, 0, mask.shape[1], mask.shape[0])
+    indices = ((np.arange(y1, y2, dtype=np.int64)-sy)[:, None] * (ex-sx)
+               + (np.arange(x1, x2, dtype=np.int64)-sx)[None, :])
+    return (mask.bits[indices // 8] >> (7-indices % 8)) & 1
 
 
 def mask_iou(a, b):
@@ -35,7 +71,18 @@ def mask_iou(a, b):
         return 0.0
     if min(a.bbox[2],b.bbox[2]) <= max(a.bbox[0],b.bbox[0]) or min(a.bbox[3],b.bbox[3]) <= max(a.bbox[1],b.bbox[1]):
         return 0.0
-    intersection = int(np.sum(POPCOUNT[np.bitwise_and(a.bits, b.bits)], dtype=np.int64))
+    if a.crop_box is None and b.crop_box is None:
+        intersection = int(np.sum(POPCOUNT[np.bitwise_and(a.bits, b.bits)], dtype=np.int64))
+    else:
+        x1, y1 = max(a.bbox[0], b.bbox[0]), max(a.bbox[1], b.bbox[1])
+        x2, y2 = min(a.bbox[2], b.bbox[2]), min(a.bbox[3], b.bbox[3])
+        rows = max(1, 65536 // (x2-x1))
+        intersection = 0
+        for start in range(y1, y2, rows):
+            end = min(y2, start+rows)
+            intersection += int(np.count_nonzero(
+                _bits_in_window(a, x1, start, x2, end)
+                & _bits_in_window(b, x1, start, x2, end)))
     union = a.area + b.area - intersection
     return intersection / union if union else 0.0
 
